@@ -1,0 +1,18 @@
+.joycode
+node_modules
+# package-lock.json
+*.DS_Store
+.joycode
+.history
+db.sql
+.history
+dist
+coverage
+*.vsix
+.joycode
+.joycode/*
+.cursorignore
+.vscode
+.vscode/*
+.agent
+.idea

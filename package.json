@@ -1,0 +1,158 @@
+{
+  "name": "add-next-code",
+  "displayName": "Add Next Code (FIM)",
+  "description": "VS Code 行内 FIM 代码补全：直连 DeepSeek 原生 FIM 接口，成本优先。",
+  "version": "0.0.1",
+  "publisher": "local",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Machine Learning"
+  ],
+  "main": "./dist/extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "virtualWorkspaces": false,
+    "untrustedWorkspaces": {
+      "supported": false
+    }
+  },
+  "contributes": {
+    "commands": [
+      { "command": "addNextCode.setApiKey", "title": "Add Next Code: 设置 API Key" },
+      { "command": "addNextCode.clearApiKey", "title": "Add Next Code: 清除 API Key" },
+      { "command": "addNextCode.toggle", "title": "Add Next Code: 开启/关闭补全" },
+      { "command": "addNextCode.showLog", "title": "Add Next Code: 打开日志" },
+      { "command": "addNextCode.showStats", "title": "Add Next Code: 显示本次会话统计" },
+      { "command": "addNextCode.restartSkimmer", "title": "Add Next Code: 重启 Skimmer 增强" }
+    ],
+    "configuration": {
+      "title": "Add Next Code",
+      "properties": {
+        "addNextCode.enable": {
+          "type": "object",
+          "default": { "*": true, "plaintext": false, "markdown": false, "scminput": false },
+          "description": "按 languageId 开关补全，* 为兜底。"
+        },
+        "addNextCode.endpoint": {
+          "type": "string",
+          "scope": "machine",
+          "default": "https://api.deepseek.com/beta/completions",
+          "description": "FIM 接口完整 URL，原样 POST。"
+        },
+        "addNextCode.model": {
+          "type": "string",
+          "default": "deepseek-flash",
+          "description": "模型名。"
+        },
+        "addNextCode.trigger.mode": {
+          "type": "string",
+          "enum": ["auto", "manual"],
+          "default": "auto",
+          "description": "auto：停笔自动触发；manual：仅手动触发（editor.action.inlineSuggest.trigger）。"
+        },
+        "addNextCode.trigger.debounceMs": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 300,
+          "maximum": 5000,
+          "description": "停笔多久后自动触发（毫秒）。"
+        },
+        "addNextCode.trigger.minIntervalMs": {
+          "type": "number",
+          "default": 3000,
+          "minimum": 0,
+          "description": "同一文档两次自动模型请求的最小发送间隔（毫秒）。"
+        },
+        "addNextCode.request.maxTokens": { "type": "number", "default": 96, "description": "自动触发的输出上限（tokens）。" },
+        "addNextCode.request.maxTokensManual": { "type": "number", "default": 192, "description": "手动触发的输出上限（tokens）。" },
+        "addNextCode.request.maxLines": { "type": "number", "default": 12, "description": "客户端截断行数，达到即中止流。" },
+        "addNextCode.request.temperature": { "type": "number", "default": 0.2, "minimum": 0, "maximum": 2 },
+        "addNextCode.request.timeoutMs": { "type": "number", "default": 8000, "description": "从发送起计的总超时（毫秒）。" },
+        "addNextCode.context.prefixChars": { "type": "number", "default": 6000, "description": "光标前字符预算。" },
+        "addNextCode.context.suffixChars": { "type": "number", "default": 1500, "description": "光标后字符预算。" },
+        "addNextCode.context.headerChars": { "type": "number", "default": 2000, "description": "头部（外部上下文注释）字符预算。" },
+        "addNextCode.context.maxPrefixLines": { "type": "number", "default": 300 },
+        "addNextCode.context.maxSuffixLines": { "type": "number", "default": 100 },
+        "addNextCode.context.extraWaitMs": { "type": "number", "default": 500, "description": "防抖与限频通过之后，等待上下文（语言服务符号、Skimmer）的上限（毫秒）。各来源共用这一个截止时间；来源正常时远小于该值，只有来源卡住才会等满。万行文件在 Skimmer 刚启动后的首次查询约需 720–760ms，超时后后台仍会完成解析，之后的查询稳态约 100ms。" },
+        "addNextCode.context.useLanguageService": { "type": "boolean", "default": true },
+        "addNextCode.suggestWidget": {
+          "type": "string",
+          "enum": ["extend", "skip"],
+          "default": "extend",
+          "description": "补全菜单可见时：extend=在选中项基础上续写；skip=不提供灰字。"
+        },
+        "addNextCode.exclude": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["**/.env*", "**/*.pem", "**/*.key", "**/node_modules/**", "**/dist/**"],
+          "description": "命中的文件不补全、不发送（glob）。"
+        },
+        "addNextCode.respectGitignore": {
+          "type": "boolean",
+          "default": true,
+          "description": "被项目 .gitignore / .git/info/exclude 匹配的文件不补全、不发送。"
+        },
+        "addNextCode.skimmer.enabled": {
+          "type": "boolean", "default": false,
+          "scope": "machine",
+          "description": "启用可选 Skimmer 上下文增强；需要支持补全协议的 Skimmer 版本。"
+        },
+        "addNextCode.skimmer.command": {
+          "type": "string", "default": "npx",
+          "scope": "machine",
+          "description": "Skimmer 启动命令或可执行文件绝对路径。"
+        },
+        "addNextCode.skimmer.args": {
+          "type": "array", "items": { "type": "string" },
+          "scope": "machine",
+          "default": ["-y", "@jokeran/frontend-code-skimmer@^0.9.0"],
+          "description": "固定兼容范围的启动参数；需要已发布含 protocol 1 接口的版本，开发时可指定本地构建。"
+        },
+        "addNextCode.skimmer.nodePath": {
+          "type": "string", "default": "node",
+          "scope": "machine",
+          "description": "Node.js >=22 的命令或绝对路径；绝对路径的目录会加入子进程 PATH。"
+        },
+        "addNextCode.skimmer.maxDocumentChars": {
+          "type": "number", "default": 2000000, "minimum": 10000, "maximum": 2000000,
+          "description": "当前文档全文快照的最大字符数；超过后使用基础补全。"
+        },
+        "addNextCode.debug.dumpPrompts": {
+          "type": "boolean",
+          "default": false,
+          "description": "仅调参用：把 prompt 写入本地日志通道。会包含源码，请勿在共享屏幕时开启。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "node esbuild.mjs",
+    "check": "npm run typecheck && npm test && npm run build",
+    "vscode:prepublish": "npm run build",
+    "package": "vsce package --no-dependencies --allow-missing-repository --skip-license"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "~1.29.0",
+    "ignore": "^7.0.14"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@types/vscode": "1.90.0",
+    "@vscode/vsce": "^3.9.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.0",
+    "vitest": "^5.1.0"
+  }
+}
