@@ -51,6 +51,12 @@ export interface RelatedItem {
   deps?: SourceDep[];
 }
 
+/** 一段未提交的改动；来自其他文件时带上该文件的指纹 */
+export interface ChangeItem {
+  text: string;
+  dep?: SourceDep;
+}
+
 export interface Header {
   text: string;
   deps: SourceDep[];
@@ -70,6 +76,8 @@ export interface Config {
   triggerMode: 'auto' | 'manual';
   debounceMs: number;
   minIntervalMs: number;
+  /** 空行策略：smart 按位置限制范围；strict 仅在注释或代码块开头之后自动触发；always 不做限制。 */
+  blankLine: 'smart' | 'strict' | 'always';
   maxTokens: number;
   maxTokensManual: number;
   maxLines: number;
@@ -82,10 +90,28 @@ export interface Config {
   maxSuffixLines: number;
   extraWaitMs: number;
   useLanguageService: boolean;
+  /** 文件内用法索引：按光标前的表达式从整份文件里找候选名字 */
+  fileUsage: boolean;
+  /** 同文件相关片段：按光标附近的标识符从窗口之外取相关代码 */
+  fileSnippets: boolean;
+  /** 未提交改动：把与光标处相关的 git diff 改动块放进提示词 */
+  gitDiff: boolean;
+  /**
+   * 连续几次请求沿用同一份头部（让服务端缓存命中）。
+   * intent：只在同一段意图注释之下；block：另外在同一个代码块内（没有意图注释时以包着光标的块开头行为准）；off：不沿用。
+   * 意图变了、手动触发、超过 5 分钟或 60 行、光标后面要补候选名字时，都重新收集。
+   */
+  reuseHeader: 'off' | 'intent' | 'block';
+  /** 实验：最相关的参照代码放到光标上方而不是提示词顶部 */
+  nearCursorReference: boolean;
+  /** 实例成员校验：off 不校验；retry 发现编造的成员时按草稿重新检索并重发一次；strict 另外不展示仍含编造成员的行 */
+  verifyMembers: 'off' | 'retry' | 'strict';
   suggestWidget: 'extend' | 'skip';
   exclude: string[];
   respectGitignore: boolean;
   dumpPrompts: boolean;
+  /** 调试：把模型原始输出与最终展示的文本写入日志（含源码片段） */
+  dumpCompletions: boolean;
   skimmerEnabled: boolean;
   skimmerCommand: string;
   skimmerArgs: string[];
@@ -102,22 +128,30 @@ export const DEFAULT_CONFIG: Config = {
   triggerMode: 'auto',
   debounceMs: 1000,
   minIntervalMs: 3000,
+  blankLine: 'smart',
   maxTokens: 96,
   maxTokensManual: 192,
   maxLines: 12,
-  temperature: 0.2,
+  temperature: 0,
   timeoutMs: 8000,
   prefixChars: 6000,
   suffixChars: 1500,
-  headerChars: 2000,
+  headerChars: 6000,
   maxPrefixLines: 300,
   maxSuffixLines: 100,
   extraWaitMs: 500,
   useLanguageService: true,
+  fileUsage: true,
+  fileSnippets: true,
+  gitDiff: true,
+  reuseHeader: 'block',
+  nearCursorReference: false,
+  verifyMembers: 'strict',
   suggestWidget: 'extend',
   exclude: ['**/.env*', '**/*.pem', '**/*.key', '**/node_modules/**', '**/dist/**'],
   respectGitignore: true,
   dumpPrompts: false,
+  dumpCompletions: false,
   skimmerEnabled: false,
   skimmerCommand: 'npx',
   skimmerArgs: ['-y', '@jokeran/frontend-code-skimmer@^0.9.0'],

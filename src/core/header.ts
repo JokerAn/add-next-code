@@ -1,8 +1,8 @@
 // 7.3 头部渲染：把窗口之外的上下文压成一小段注释，拼在 prefix 最前面。
-import type { Framework, Header, Member, RelatedItem, SourceDep } from './types';
+import type { ChangeItem, Framework, Header, Member, RelatedItem, SourceDep } from './types';
 import { EMPTY_HEADER } from './types';
 
-export type HeaderStyle = 'line' | 'html';
+export type HeaderStyle = 'line' | 'html' | 'block';
 
 export interface HeaderInput {
   /** 相对路径，仅用于展示 */
@@ -12,6 +12,12 @@ export interface HeaderInput {
   related: RelatedItem[];
   /** 窗口文本（prefix + suffix），用于裁剪时判断成员是否相关 */
   windowText: string;
+  /** 未提交的改动块，每段多行；排在成员之后（内容相对稳定），超预算时在片段之后、从末尾开始丢 */
+  changes?: ChangeItem[];
+  /** 同文件里窗口之外的相关代码片段，每段多行；超预算时在成员之后、从末尾开始丢 */
+  snippets?: string[];
+  /** 针对光标处表达式的候选名字行；排在最后，裁剪时最后才丢 */
+  focus?: string[];
   style: HeaderStyle;
   budgetChars: number;
 }
@@ -67,13 +73,20 @@ function wrap(lines: string[], style: HeaderStyle): string {
   const head = '[context] reference only, not part of this file';
   const tail = '[/context]';
   if (style === 'html') {
-    return `<!--\n${[head, ...lines, tail].join('\n')}\n-->\n`;
+    return `<!--\n${[head, ...lines, tail].join('\n').replace(/-->/g, '-- >')}\n-->\n`;
+  }
+  if (style === 'block') {
+    return `/*\n${[head, ...lines, tail].join('\n').replace(/\*\//g, '* /')}\n*/\n`;
   }
   return [head, ...lines, tail].map((l) => `// ${l}`).join('\n') + '\n';
 }
 
 export function renderHeader(input: HeaderInput): Header {
-  const hasExtra = input.members.length > 0 || input.related.length > 0;
+  const focus = input.focus ?? [];
+  let snippets = input.snippets ?? [];
+  let changes = input.changes ?? [];
+  const hasExtra = input.members.length > 0 || input.related.length > 0 || focus.length > 0 || snippets.length > 0 ||
+    changes.length > 0;
   if (!hasExtra) {
     return EMPTY_HEADER;
   }
@@ -86,15 +99,33 @@ export function renderHeader(input: HeaderInput): Header {
     if (withMembers && mem.length > 0) {
       lines.push(`members: ${renderMembers(mem)}`);
     }
+    if (changes.length > 0) {
+      lines.push('uncommitted changes in this project (new code, most relevant parts):');
+      for (const change of changes) {
+        lines.push(...change.text.split('\n'), '...');
+      }
+    }
     for (const r of rel) {
       lines.push(renderRelated(r));
     }
+    if (snippets.length > 0) {
+      lines.push('related code elsewhere in this file:');
+      for (const snippet of snippets) {
+        lines.push(...snippet.split('\n'), '...');
+      }
+    }
+    lines.push(...focus);
     const deps: SourceDep[] = [];
     for (const r of rel) {
       if (r.dep) {
         deps.push(r.dep);
       }
       deps.push(...(r.deps ?? []));
+    }
+    for (const change of changes) {
+      if (change.dep && !deps.some((dep) => dep.uri === change.dep?.uri)) {
+        deps.push(change.dep);
+      }
     }
     return { text: wrap(lines, input.style), deps };
   };
@@ -111,6 +142,14 @@ export function renderHeader(input: HeaderInput): Header {
     current = build(rel, members, true);
   }
   if (current.text.length > input.budgetChars) {
+    current = build(rel, members, false);
+  }
+  while (current.text.length > input.budgetChars && snippets.length > 0) {
+    snippets = snippets.slice(0, -1);
+    current = build(rel, members, false);
+  }
+  while (current.text.length > input.budgetChars && changes.length > 0) {
+    changes = changes.slice(0, -1);
     current = build(rel, members, false);
   }
   if (current.text.length > input.budgetChars) {

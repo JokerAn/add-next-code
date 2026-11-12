@@ -127,6 +127,8 @@ beforeEach(async () => {
     'trigger.debounceMs': 300,
     'trigger.minIntervalMs': 0,
     'context.useLanguageService': false,
+    // 这组用例用假时钟验证装配边界，不启动真实的 git 进程
+    'context.gitDiff': false,
     exclude: [],
   };
   const subscriptions: Array<{ dispose(): void }> = [];
@@ -158,6 +160,8 @@ beforeEach(async () => {
       onDidChangeConfiguration: configChanged.event,
       onDidChangeTextDocument: new Emitter().event,
       onDidCloseTextDocument: new Emitter().event,
+      onDidSaveTextDocument: new Emitter().event,
+      isTrusted: true,
       onDidOpenTextDocument: new Emitter().event,
     },
     window: {

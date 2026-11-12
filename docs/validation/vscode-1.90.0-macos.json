@@ -1,0 +1,73 @@
+{
+  "vscode": "1.90.0",
+  "platform": "darwin",
+  "cases": [
+    {
+      "name": "trigger and accept completion",
+      "mode": "VS Code commands",
+      "passed": true
+    },
+    {
+      "name": "selected menu item extend contract",
+      "mode": "production Provider + real editor",
+      "passed": true
+    },
+    {
+      "name": "selected menu item skip guard",
+      "mode": "production Provider + real editor",
+      "passed": true
+    },
+    {
+      "name": "edit and cancellation discard delayed response",
+      "mode": "production Provider + real editor/token",
+      "passed": true
+    },
+    {
+      "name": "multiple cursor guard",
+      "mode": "production Provider + real editor",
+      "passed": true
+    },
+    {
+      "name": "gitignore blocks transmission",
+      "mode": "production Provider + real file",
+      "passed": true
+    },
+    {
+      "name": "long-line request stays within budgets",
+      "mode": "production Provider + loopback body",
+      "passed": true
+    },
+    {
+      "name": "vue2 Skimmer self and related header",
+      "mode": "production Provider + real editor + published Skimmer",
+      "passed": true
+    },
+    {
+      "name": "vue3 Skimmer self and related header",
+      "mode": "production Provider + real editor + published Skimmer",
+      "passed": true
+    },
+    {
+      "name": "react Skimmer self and related header",
+      "mode": "production Provider + real editor + published Skimmer",
+      "passed": true
+    },
+    {
+      "name": "node Skimmer self and related header",
+      "mode": "production Provider + real editor + published Skimmer",
+      "passed": true
+    },
+    {
+      "name": "dirty Vue dependency removed from enhancement header",
+      "mode": "production Provider + real unsaved document + published Skimmer",
+      "passed": true
+    }
+  ],
+  "requests": 24,
+  "skimmer": true,
+  "limits": [
+    "Menu cases call the registered production Provider with SelectedCompletionInfo; they do not automate suggest-widget UI.",
+    "Enhancement cases use the production manifest and Provider in a real editor, published Skimmer and no Vetur/Volar language service.",
+    "No screenshot, real model, paid request or user SecretStorage is used."
+  ]
+}

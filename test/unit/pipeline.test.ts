@@ -114,7 +114,7 @@ describe('CompletionPipeline', () => {
     expect(h.fim.requests).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(2);
     await vi.advanceTimersByTimeAsync(1000);
-    expect(await p).toEqual({ text: 'compute(1)' });
+    expect(await p).toEqual({ text: 'compute(1)', seq: 1 });
     expect(h.fim.requests).toHaveLength(1);
     const req = h.fim.requests[0]!;
     expect(req.prompt.endsWith('const total = ')).toBe(true);

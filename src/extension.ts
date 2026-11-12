@@ -1,18 +1,28 @@
+import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 import { HealthState } from './core/backoff';
+import { BuildWatch } from './core/buildWatch';
 import { CompletionCache } from './core/cache';
 import { createCollector } from './core/collector';
 import { DeepSeekFimClient } from './core/fim/client';
 import { Metrics } from './core/metrics';
 import { CompletionPipeline } from './core/pipeline';
 import { Scheduler } from './core/scheduler';
+import { createSnippetSource } from './core/snippets';
+import { createScopeSource, createUsageSource } from './core/usage';
 import { ConfigStore } from './vscode/config';
-import { FimInlineProvider } from './vscode/provider';
+import { GitDiffSource } from './vscode/gitDiff';
+import { ACCEPTED_COMMAND, FimInlineProvider } from './vscode/provider';
 import { KeyStore } from './vscode/secrets';
 import { StatusController } from './vscode/status';
 import { SymbolSource } from './vscode/symbols';
 import { SkimmerSource } from './vscode/skimmer';
 import { PermissionGate, ProjectInfo, depsIo } from './vscode/workspace';
+
+/** 由 esbuild 在打包时注入；测试与未打包运行时没有 */
+declare const __BUILD_ID__: string | undefined;
+const BUILD_ID = typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : 'dev';
+const STALE_NOTICE = '磁盘上的扩展已更新，当前窗口仍在运行旧版；执行 Developer: Reload Window 后生效';
 
 const ENABLED_STATE_KEY = 'addNextCode.runtimeEnabled';
 let activeSkimmer: SkimmerSource | undefined;
@@ -26,6 +36,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const status = new StatusController(health);
   const metrics = new Metrics();
   const cache = new CompletionCache();
+  status.log(`[build] ${BUILD_ID}`);
+  // 安装同版本号的 VSIX 不会自动重载窗口：发现磁盘上的文件变了就提醒一次
+  const entry = typeof __filename === 'string' ? __filename : undefined;
+  const buildWatch = new BuildWatch(() => {
+    try {
+      return entry ? fs.statSync(entry).mtimeMs : undefined;
+    } catch {
+      return undefined;
+    }
+  });
+  const buildTimer = entry ? setInterval(() => {
+    if (buildWatch.shouldNotify()) {
+      status.log(`[build] ${STALE_NOTICE}`);
+      void vscode.window.showWarningMessage(`Add Next Code：${STALE_NOTICE}。`, '重载窗口').then((choice) => {
+        if (choice === '重载窗口') {
+          void vscode.commands.executeCommand('workbench.action.reloadWindow');
+        }
+      });
+    }
+  }, 5000) : undefined;
   const gate = new PermissionGate(config.get());
   const project = new ProjectInfo();
   const symbols = new SymbolSource(() => config.get().useLanguageService);
@@ -36,6 +66,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     status: (text) => status.setSkimmer(text),
     log: (line) => status.log(line),
     onIndexChanged: () => cache.clear(),
+    onQuery: (record) => metrics.recordSkimmer(record),
   });
   activeSkimmer = skimmer;
 
@@ -61,8 +92,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     onAbortSettled: (ms) => metrics.abortSettleMs.push(ms),
   });
 
+  // 本次会话里编辑过的文档，用于给它们的未提交改动加权；只记 uri 与时间
+  const recentDocs = new Map<string, number>();
+  const gitDiff = new GitDiffSource({
+    enabled: () => config.get().gitDiff,
+    gate,
+    recentDocs: () => recentDocs.keys(),
+  });
+
   const collector = createCollector({
-    sources: [symbols, skimmer],
+    sources: [
+      symbols, skimmer, gitDiff,
+      createSnippetSource(() => config.get().fileSnippets, () => config.get().nearCursorReference),
+      createScopeSource(() => config.get().fileUsage),
+      createUsageSource(() => config.get().fileUsage),
+    ],
     vueMajor: (docKey) => project.vueMajor(docKey),
   });
 
@@ -90,6 +134,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     new vscode.Disposable(() => pipeline.invalidate()),
+    new vscode.Disposable(() => clearInterval(buildTimer)),
     config,
     keys,
     status,
@@ -103,11 +148,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (e.contentChanges.length === 0) {
         return;
       }
-      pipeline.onDocumentChanged(
-        e.document.uri.toString(),
-        e.contentChanges.map((c) => c.range.start.line),
-      );
+      const key = e.document.uri.toString();
+      pipeline.onDocumentChanged(key, e.contentChanges.map((c) => c.range.start.line));
+      recentDocs.delete(key);
+      recentDocs.set(key, Date.now());
+      if (recentDocs.size > 50) {
+        recentDocs.delete(recentDocs.keys().next().value as string);
+      }
     }),
+    // 保存后磁盘上的改动变了，重新取 diff
+    vscode.workspace.onDidSaveTextDocument(() => gitDiff.invalidate()),
     vscode.workspace.onDidCloseTextDocument((doc) => {
       const key = doc.uri.toString();
       pipeline.onDocumentClosed(key);
@@ -127,6 +177,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       health.onConfigChanged();
       cache.clear();
+      gitDiff.invalidate();
       status.render();
     }),
     keys.onDidChange(() => {
@@ -164,6 +215,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await context.globalState.update(ENABLED_STATE_KEY, runtimeEnabled);
       void vscode.window.showInformationMessage(`Add Next Code：补全已${runtimeEnabled ? '开启' : '关闭'}。`);
     }),
+    vscode.commands.registerCommand(ACCEPTED_COMMAND, (seq: unknown) => {
+      if (typeof seq === 'number' && metrics.markAccepted(seq)) {
+        status.log(JSON.stringify({ seq, accepted: true }));
+      }
+    }),
     vscode.commands.registerCommand('addNextCode.showLog', () => status.channel.show(true)),
     vscode.commands.registerCommand('addNextCode.restartSkimmer', async () => {
       pipeline.invalidate();
@@ -171,7 +227,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await skimmer.restart();
     }),
     vscode.commands.registerCommand('addNextCode.showStats', () => {
-      status.channel.appendLine('─── 会话统计 ───');
+      status.channel.appendLine(`─── 会话统计（构建 ${BUILD_ID}）───`);
+      if (buildWatch.stale) {
+        status.channel.appendLine(`⚠ ${STALE_NOTICE}`);
+      }
       status.channel.appendLine(metrics.summary());
       status.channel.show(true);
     }),

@@ -2,10 +2,11 @@
   "name": "add-next-code",
   "displayName": "Add Next Code (FIM)",
   "description": "VS Code 行内 FIM 代码补全：直连 DeepSeek 原生 FIM 接口，成本优先。",
-  "version": "0.0.1",
-  "publisher": "local",
+  "version": "1.0.0",
+  "publisher": "jokeran",
   "private": true,
   "license": "UNLICENSED",
+  "icon": "images/icon.png",
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -27,20 +28,55 @@
     }
   },
   "contributes": {
+    "languages": [
+      {
+        "id": "vue",
+        "extensions": [
+          ".vue"
+        ],
+        "aliases": [
+          "Vue",
+          "vue"
+        ]
+      }
+    ],
     "commands": [
-      { "command": "addNextCode.setApiKey", "title": "Add Next Code: 设置 API Key" },
-      { "command": "addNextCode.clearApiKey", "title": "Add Next Code: 清除 API Key" },
-      { "command": "addNextCode.toggle", "title": "Add Next Code: 开启/关闭补全" },
-      { "command": "addNextCode.showLog", "title": "Add Next Code: 打开日志" },
-      { "command": "addNextCode.showStats", "title": "Add Next Code: 显示本次会话统计" },
-      { "command": "addNextCode.restartSkimmer", "title": "Add Next Code: 重启 Skimmer 增强" }
+      {
+        "command": "addNextCode.setApiKey",
+        "title": "Add Next Code: 设置 API Key"
+      },
+      {
+        "command": "addNextCode.clearApiKey",
+        "title": "Add Next Code: 清除 API Key"
+      },
+      {
+        "command": "addNextCode.toggle",
+        "title": "Add Next Code: 开启/关闭补全"
+      },
+      {
+        "command": "addNextCode.showLog",
+        "title": "Add Next Code: 打开日志"
+      },
+      {
+        "command": "addNextCode.showStats",
+        "title": "Add Next Code: 显示本次会话统计"
+      },
+      {
+        "command": "addNextCode.restartSkimmer",
+        "title": "Add Next Code: 重启 Skimmer 增强"
+      }
     ],
     "configuration": {
       "title": "Add Next Code",
       "properties": {
         "addNextCode.enable": {
           "type": "object",
-          "default": { "*": true, "plaintext": false, "markdown": false, "scminput": false },
+          "default": {
+            "*": true,
+            "plaintext": false,
+            "markdown": false,
+            "scminput": false
+          },
           "description": "按 languageId 开关补全，* 为兜底。"
         },
         "addNextCode.endpoint": {
@@ -56,7 +92,10 @@
         },
         "addNextCode.trigger.mode": {
           "type": "string",
-          "enum": ["auto", "manual"],
+          "enum": [
+            "auto",
+            "manual"
+          ],
           "default": "auto",
           "description": "auto：停笔自动触发；manual：仅手动触发（editor.action.inlineSuggest.trigger）。"
         },
@@ -73,28 +112,151 @@
           "minimum": 0,
           "description": "同一文档两次自动模型请求的最小发送间隔（毫秒）。"
         },
-        "addNextCode.request.maxTokens": { "type": "number", "default": 96, "description": "自动触发的输出上限（tokens）。" },
-        "addNextCode.request.maxTokensManual": { "type": "number", "default": 192, "description": "手动触发的输出上限（tokens）。" },
-        "addNextCode.request.maxLines": { "type": "number", "default": 12, "description": "客户端截断行数，达到即中止流。" },
-        "addNextCode.request.temperature": { "type": "number", "default": 0.2, "minimum": 0, "maximum": 2 },
-        "addNextCode.request.timeoutMs": { "type": "number", "default": 8000, "description": "从发送起计的总超时（毫秒）。" },
-        "addNextCode.context.prefixChars": { "type": "number", "default": 6000, "description": "光标前字符预算。" },
-        "addNextCode.context.suffixChars": { "type": "number", "default": 1500, "description": "光标后字符预算。" },
-        "addNextCode.context.headerChars": { "type": "number", "default": 2000, "description": "头部（外部上下文注释）字符预算。" },
-        "addNextCode.context.maxPrefixLines": { "type": "number", "default": 300 },
-        "addNextCode.context.maxSuffixLines": { "type": "number", "default": 100 },
-        "addNextCode.context.extraWaitMs": { "type": "number", "default": 500, "description": "防抖与限频通过之后，等待上下文（语言服务符号、Skimmer）的上限（毫秒）。各来源共用这一个截止时间；来源正常时远小于该值，只有来源卡住才会等满。万行文件在 Skimmer 刚启动后的首次查询约需 720–760ms，超时后后台仍会完成解析，之后的查询稳态约 100ms。" },
-        "addNextCode.context.useLanguageService": { "type": "boolean", "default": true },
+        "addNextCode.trigger.blankLine": {
+          "type": "string",
+          "enum": [
+            "smart",
+            "strict",
+            "always"
+          ],
+          "default": "smart",
+          "enumDescriptions": [
+            "空行位于注释或刚打开的代码块之后时允许多行，其余空行只补一条语句。",
+            "空行只有位于注释或刚打开的代码块之后才自动触发；手动触发不受限。",
+            "不区分空行，一律按多行补全。"
+          ],
+          "description": "光标停在空行时的补全策略。"
+        },
+        "addNextCode.request.maxTokens": {
+          "type": "number",
+          "default": 96,
+          "description": "自动触发的输出上限（tokens）。"
+        },
+        "addNextCode.request.maxTokensManual": {
+          "type": "number",
+          "default": 192,
+          "description": "手动触发的输出上限（tokens）。"
+        },
+        "addNextCode.request.maxLines": {
+          "type": "number",
+          "default": 12,
+          "description": "客户端截断行数，达到即中止流。"
+        },
+        "addNextCode.request.temperature": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "采样温度。0 表示同一位置重复触发得到相同结果。"
+        },
+        "addNextCode.request.timeoutMs": {
+          "type": "number",
+          "default": 8000,
+          "description": "从发送起计的总超时（毫秒）。"
+        },
+        "addNextCode.context.prefixChars": {
+          "type": "number",
+          "default": 6000,
+          "description": "光标前字符预算。"
+        },
+        "addNextCode.context.suffixChars": {
+          "type": "number",
+          "default": 1500,
+          "description": "光标后字符预算。"
+        },
+        "addNextCode.context.headerChars": {
+          "type": "number",
+          "default": 6000,
+          "description": "头部（外部上下文注释）字符预算。"
+        },
+        "addNextCode.context.maxPrefixLines": {
+          "type": "number",
+          "default": 300
+        },
+        "addNextCode.context.maxSuffixLines": {
+          "type": "number",
+          "default": 100
+        },
+        "addNextCode.context.extraWaitMs": {
+          "type": "number",
+          "default": 500,
+          "description": "防抖与限频通过之后，等待上下文（语言服务符号、Skimmer）的上限（毫秒）。各来源共用这一个截止时间；来源正常时远小于该值，只有来源卡住才会等满。万行文件在 Skimmer 刚启动后的首次查询约需 720–760ms，超时后后台仍会完成解析，之后的查询稳态约 100ms。"
+        },
+        "addNextCode.context.useLanguageService": {
+          "type": "boolean",
+          "default": true
+        },
+        "addNextCode.context.fileSnippets": {
+          "type": "boolean",
+          "default": true,
+          "description": "按光标附近的标识符，从当前文件里窗口之外的位置取最相关的几段代码放进提示词（例如模板里的绑定、别处已有的同类写法、被调用方法的定义）。纯文本检索，不依赖语言服务。"
+        },
+        "addNextCode.context.gitDiff": {
+          "type": "boolean",
+          "default": true,
+          "description": "把未提交的改动（git diff HEAD）里与光标处相关的改动块放进提示词，最多 6 块、约 1600 字符。当前文件的改动总是候选，其他文件的改动必须与光标附近的名字有交集；被 .gitignore 或 addNextCode.exclude 匹配的文件、有未保存修改的其他文件不会进入。需要本机可执行 git。"
+        },
+        "addNextCode.experimental.referenceNearCursor": {
+          "type": "boolean",
+          "default": false,
+          "description": "实验：把最相关的一两段参照代码（名字与固定搭档的用法、与意图注释对上的整段旧代码）放到光标上方的意图注释之前，而不是提示词顶部。只在脚本区域生效，只改发给模型的内容，不改文件。可能让模型更愿意照着已有代码写，也可能让它照抄参照，效果需自行对比。"
+        },
+        "addNextCode.context.reuseHeader": {
+          "type": "string",
+          "enum": [
+            "block",
+            "intent",
+            "off"
+          ],
+          "default": "block",
+          "enumDescriptions": [
+            "同一段意图注释之下，以及在同一个代码块里逐行往下写时（没有意图注释），连续的自动补全沿用同一份头部。",
+            "只在同一段意图注释之下沿用。",
+            "不沿用，每次都重新收集。"
+          ],
+          "description": "头部在提示词最前面，每次都变会让服务端的前缀缓存全部失效；沿用后后面的几千个 token 可以命中缓存（价格约为未命中的 1/50），也省掉重复的上下文收集。意图注释变了、离开所在代码块、手动触发、超过 5 分钟或离原位置 60 行以上、头部引用的代码被改过、光标前正在补候选名字（如 this.）时，都会重新收集。"
+        },
+        "addNextCode.verify.members": {
+          "type": "string",
+          "enum": [
+            "strict",
+            "retry",
+            "off"
+          ],
+          "default": "strict",
+          "enumDescriptions": [
+            "补全里出现本文件不存在的 this 成员或 $refs 名字时，按草稿重新检索并重发一次；仍然存在的，从那一行起不展示。",
+            "同上重发一次，但不截断结果。",
+            "不校验。"
+          ],
+          "description": "校验补全里的实例成员是否真实存在于当前文件。以 $ 开头的成员（框架与插件注入）不校验。"
+        },
+        "addNextCode.context.fileUsage": {
+          "type": "boolean",
+          "default": true,
+          "description": "按光标前的表达式（如 this.form.、row.、或正在敲的半个名字），从当前文件的声明与用法里找出候选名字放进提示词。纯文本扫描，不依赖语言服务。"
+        },
         "addNextCode.suggestWidget": {
           "type": "string",
-          "enum": ["extend", "skip"],
+          "enum": [
+            "extend",
+            "skip"
+          ],
           "default": "extend",
           "description": "补全菜单可见时：extend=在选中项基础上续写；skip=不提供灰字。"
         },
         "addNextCode.exclude": {
           "type": "array",
-          "items": { "type": "string" },
-          "default": ["**/.env*", "**/*.pem", "**/*.key", "**/node_modules/**", "**/dist/**"],
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/.env*",
+            "**/*.pem",
+            "**/*.key",
+            "**/node_modules/**",
+            "**/dist/**"
+          ],
           "description": "命中的文件不补全、不发送（glob）。"
         },
         "addNextCode.respectGitignore": {
@@ -103,34 +265,51 @@
           "description": "被项目 .gitignore / .git/info/exclude 匹配的文件不补全、不发送。"
         },
         "addNextCode.skimmer.enabled": {
-          "type": "boolean", "default": false,
+          "type": "boolean",
+          "default": false,
           "scope": "machine",
           "description": "启用可选 Skimmer 上下文增强；需要支持补全协议的 Skimmer 版本。"
         },
         "addNextCode.skimmer.command": {
-          "type": "string", "default": "npx",
+          "type": "string",
+          "default": "npx",
           "scope": "machine",
           "description": "Skimmer 启动命令或可执行文件绝对路径。"
         },
         "addNextCode.skimmer.args": {
-          "type": "array", "items": { "type": "string" },
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
           "scope": "machine",
-          "default": ["-y", "@jokeran/frontend-code-skimmer@^0.9.0"],
+          "default": [
+            "-y",
+            "@jokeran/frontend-code-skimmer@^0.9.0"
+          ],
           "description": "固定兼容范围的启动参数；需要已发布含 protocol 1 接口的版本，开发时可指定本地构建。"
         },
         "addNextCode.skimmer.nodePath": {
-          "type": "string", "default": "node",
+          "type": "string",
+          "default": "node",
           "scope": "machine",
           "description": "Node.js >=22 的命令或绝对路径；绝对路径的目录会加入子进程 PATH。"
         },
         "addNextCode.skimmer.maxDocumentChars": {
-          "type": "number", "default": 2000000, "minimum": 10000, "maximum": 2000000,
+          "type": "number",
+          "default": 2000000,
+          "minimum": 10000,
+          "maximum": 2000000,
           "description": "当前文档全文快照的最大字符数；超过后使用基础补全。"
         },
         "addNextCode.debug.dumpPrompts": {
           "type": "boolean",
           "default": false,
           "description": "仅调参用：把 prompt 写入本地日志通道。会包含源码，请勿在共享屏幕时开启。"
+        },
+        "addNextCode.debug.dumpCompletions": {
+          "type": "boolean",
+          "default": false,
+          "description": "仅排查用：把模型原始输出、成员校验判定为不存在的名字、重发后的输出和最终展示的文本写入本地日志通道。会包含源码片段，请勿在共享屏幕时开启，用完关闭。"
         }
       }
     }
@@ -138,6 +317,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:integration": "node tools/run-integration.mjs",
     "build": "node esbuild.mjs",
     "check": "npm run typecheck && npm test && npm run build",
     "vscode:prepublish": "npm run build",
@@ -150,6 +330,7 @@
   "devDependencies": {
     "@types/node": "^22.20.1",
     "@types/vscode": "1.90.0",
+    "@vscode/test-electron": "3.1.0",
     "@vscode/vsce": "^3.9.0",
     "esbuild": "^0.28.2",
     "typescript": "^5.9.0",

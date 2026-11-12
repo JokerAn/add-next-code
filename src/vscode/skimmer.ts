@@ -5,6 +5,7 @@ import type { ContextSource, SourceContext, SourceResult } from '../core/collect
 import { depsValid } from '../core/deps';
 import { SkimmerClient } from '../core/skimmer/client';
 import type { Config, Framework, RelatedItem, SourceDep } from '../core/types';
+import type { SkimmerQueryRecord } from '../core/metrics';
 import { depsIo, type PermissionGate } from './workspace';
 
 function relative(root: string, file: string): string | undefined {
@@ -27,6 +28,7 @@ export interface SkimmerSourceDeps {
   status(text: string): void;
   log(text: string): void;
   onIndexChanged(): void;
+  onQuery?(record: SkimmerQueryRecord): void;
 }
 
 /** 只在通过防抖后的 collector 内调用，基础模式不依赖这个来源。 */
@@ -44,6 +46,7 @@ export class SkimmerSource implements ContextSource, vscode.Disposable {
         };
       },
       status: d.status, log: d.log, onIndexChanged: d.onIndexChanged,
+      onQuery: d.onQuery,
     });
   }
 
@@ -149,7 +152,7 @@ export class SkimmerSource implements ContextSource, vscode.Disposable {
       : data.framework === 'unknown' ? undefined : data.framework;
     return {
       members: data.self?.members ?? [], related, framework,
-      status: data.index.state === 'locked' ? 'locked' : data.overlay.state === 'failed' ? 'failed' : 'ok',
+      status: data.index.state === 'locked' ? 'locked' : data.overlay.state === 'ready' ? 'ok' : data.overlay.state,
     };
   }
 

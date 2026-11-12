@@ -5,6 +5,8 @@ export interface Fingerprint {
   size: number;
 }
 
+export type SkimmerDropReason = 'dirty' | 'stale' | 'budget';
+
 export interface CompletionContextRequest {
   protocol: 1;
   vue_major?: 2 | 3;
@@ -34,8 +36,8 @@ export interface CompletionContextResponse {
     fingerprint: Fingerprint;
     dependencies?: Array<{ file: string; fingerprint: Fingerprint }>;
   }>;
-  dropped: Array<{ file: string; reason: 'dirty' | 'stale' | 'budget' }>;
-  elapsedMs: number;
+  dropped: Array<{ file: string; reason: SkimmerDropReason }>;
+  elapsedMs?: number;
 }
 
 export class IncompatibleSkimmerError extends Error {}
@@ -123,6 +125,15 @@ export function parseCompletionContext(value: unknown): CompletionContextRespons
       }
     }
   }
+  const dropped: CompletionContextResponse['dropped'] = [];
+  if (Array.isArray(v.dropped)) {
+    for (const raw of v.dropped.slice(0, 200)) {
+      const item = object(raw);
+      if (item && typeof item.file === 'string' && ['dirty', 'stale', 'budget'].includes(String(item.reason))) {
+        dropped.push({ file: item.file.slice(0, 4096), reason: item.reason as SkimmerDropReason });
+      }
+    }
+  }
   return {
     protocol: 1, framework,
     overlay: { state: overlay as CompletionContextResponse['overlay']['state'] },
@@ -132,7 +143,7 @@ export function parseCompletionContext(value: unknown): CompletionContextRespons
     },
     self: self ? { members: members(self.members), truncated: self.truncated === true } : null,
     related,
-    dropped: [],
-    elapsedMs: typeof v.elapsedMs === 'number' ? v.elapsedMs : 0,
+    dropped,
+    ...(typeof v.elapsedMs === 'number' && Number.isFinite(v.elapsedMs) && v.elapsedMs >= 0 ? { elapsedMs: v.elapsedMs } : {}),
   };
 }

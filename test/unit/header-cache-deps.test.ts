@@ -39,6 +39,17 @@ describe('renderHeader', () => {
     expect(h.text.endsWith('-->\n')).toBe(true);
   });
 
+  it('样式区用块注释，签名中的结束符不会提前结束上下文', () => {
+    const h = renderHeader({
+      file: 'a.vue', framework: 'vue2',
+      members: [{ kind: 'data', name: 'value', signature: 'value: "*/"' }],
+      related: [], windowText: '', style: 'block', budgetChars: 2000,
+    });
+    expect(h.text.startsWith('/*\n')).toBe(true);
+    expect(h.text.endsWith('*/\n')).toBe(true);
+    expect(h.text.match(/\*\//g)).toHaveLength(1);
+  });
+
   it('确定性：成员输入顺序不影响输出', () => {
     const a = renderHeader({ file: 'a', framework: 'vue2', members, related: [], windowText: '', style: 'line', budgetChars: 2000 });
     const b = renderHeader({ file: 'a', framework: 'vue2', members: [...members].reverse(), related: [], windowText: '', style: 'line', budgetChars: 2000 });

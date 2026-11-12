@@ -9,6 +9,8 @@ export interface FimRequest {
   temperature: number;
   stop?: string[];
   maxLines: number;
+  /** 对累计文本的额外截断规则：返回截断后的文本即中止流，返回 undefined 表示继续。 */
+  cut?(text: string): string | undefined;
   signal: AbortSignal;
 }
 
@@ -26,6 +28,10 @@ export interface FimResult {
   finishReason: FinishReason;
   usage?: FimUsage;
   firstByteMs?: number;
+  /** 第一段非空文本到达的时间 */
+  firstTokenMs?: number;
+  /** 带 finish_reason 的数据块到达的时间；与 totalMs 的差就是等待流关闭的时间 */
+  finishMs?: number;
   totalMs: number;
 }
 
@@ -205,6 +211,8 @@ export class DeepSeekFimClient implements FimClient {
     let finish: FinishReason = 'other';
     let usage: FimUsage | undefined;
     let firstByteMs: number | undefined;
+    let firstTokenMs: number | undefined;
+    let finishMs: number | undefined;
     let done = false;
     let cut = false;
 
@@ -223,10 +231,12 @@ export class DeepSeekFimClient implements FimClient {
         const choice = chunk.choices?.[0];
         if (choice?.finish_reason) {
           finish = mapFinish(choice.finish_reason);
+          finishMs ??= Date.now() - started;
         }
         if (choice?.text) {
+          firstTokenMs ??= Date.now() - started;
           text += choice.text;
-          const clipped = cutToLines(text, req.maxLines);
+          const clipped = req.cut?.(text) ?? cutToLines(text, req.maxLines);
           if (clipped !== undefined) {
             text = clipped;
             cut = true;
@@ -277,6 +287,8 @@ export class DeepSeekFimClient implements FimClient {
       // 客户端截断时 usage 未知
       usage: cut ? undefined : usage,
       firstByteMs,
+      firstTokenMs,
+      finishMs,
       totalMs: Date.now() - started,
     };
   }

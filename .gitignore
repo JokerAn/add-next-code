@@ -8,6 +8,7 @@ db.sql
 .history
 dist
 coverage
+.vscode-test/
 *.vsix
 .joycode
 .joycode/*

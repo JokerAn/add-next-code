@@ -229,6 +229,16 @@ describe('Skimmer 来源边界', () => {
     });
   });
 
+  it.each(['stale', 'failed'])('保留 $0 摘要状态，不丢弃独立可用的成员或关联接口', async (state) => {
+    const data = await response();
+    data.overlay.state = state;
+    mock.query.mockResolvedValue(data);
+    const result = await collect();
+    expect(result?.status).toBe(state);
+    expect(result?.members).toEqual([{ kind: 'methods', name: 'load' }]);
+    expect(result?.related).toHaveLength(1);
+  });
+
   it('拒绝逃逸项目的路径及符号链接', async () => {
     await symlink(path.join(root, '..'), path.join(root, 'outside'));
     const data = await response();

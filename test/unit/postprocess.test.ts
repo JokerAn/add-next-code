@@ -51,7 +51,8 @@ describe('postprocess', () => {
   });
 
   it('后文行重叠：第一行不处理，短行（< 6）不处理', () => {
-    expect(pp('}\n}', { suffix: '\n}' })).toBe('}\n}');
+    expect(pp('return total;\nx', { suffix: '\nreturn total;' })).toBe('return total;\nx');
+    expect(pp('ab;\nab;', { suffix: '\nab;' })).toBe('ab;\nab;');
   });
 
   it('评审反例：不做括号计数裁剪（console.log(|) 处返回 ")" 必须原样保留）', () => {

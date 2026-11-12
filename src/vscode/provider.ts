@@ -7,6 +7,9 @@ import { liveDoc } from './docWindow';
 import type { KeyStore } from './secrets';
 import type { PermissionGate } from './workspace';
 
+/** 内部命令，不在命令面板展示 */
+export const ACCEPTED_COMMAND = 'addNextCode._accepted';
+
 export interface ProviderDeps {
   cfg(): Config;
   runtimeEnabled(): boolean;
@@ -81,11 +84,13 @@ export class FimInlineProvider implements vscode.InlineCompletionItemProvider {
     if (!out || token.isCancellationRequested || !isValid()) {
       return undefined;
     }
+    // 补全插入文档后由 VS Code 执行，用于统计采纳
+    const accepted: vscode.Command = { title: '', command: ACCEPTED_COMMAND, arguments: [out.seq] };
     if (sci) {
       // 官方契约：存在选中项时，候选必须使用相同 range，并以选中项文本开头
-      return [new vscode.InlineCompletionItem(sci.text + out.text, sci.range)];
+      return [new vscode.InlineCompletionItem(sci.text + out.text, sci.range, accepted)];
     }
     // 必须显式传空范围，省略 range 会替换光标处的单词
-    return [new vscode.InlineCompletionItem(out.text, new vscode.Range(position, position))];
+    return [new vscode.InlineCompletionItem(out.text, new vscode.Range(position, position), accepted)];
   }
 }
