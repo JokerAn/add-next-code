@@ -85,7 +85,7 @@ export class GitDiffSource implements ContextSource {
       windowLines++;
     }
     const ranked = rankDiffHunks({
-      hunks, query: queryOf(ctx.source, ctx.line, ctx.hint), currentFile,
+      hunks, query: ctx.query ?? queryOf(ctx.source, ctx.line, ctx.hint), currentFile,
       windowStart: ctx.windowStartLine, windowEnd: ctx.windowStartLine + windowLines, recentFiles,
     });
     // 其他文件的改动进入提示词前，使用与当前文档一致的发送许可；有未保存修改的文件磁盘内容已过期，不用

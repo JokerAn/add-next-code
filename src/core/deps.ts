@@ -4,19 +4,18 @@ import type { SourceDep } from './types';
 export interface DepsIo {
   /** 文件当前指纹；文件不存在返回 undefined */
   stat(uri: string): Promise<{ mtimeMs: number; size: number } | undefined>;
-  /** 该文件在本窗口是否处于未保存状态 */
-  isDirty(uri: string): boolean;
+  /** 该文件在本窗口是否处于未保存状态（支持同步或异步返回） */
+  isDirty(uri: string): boolean | Promise<boolean>;
 }
 
 /** deps 为空时直接有效，不产生任何 IO。 */
 export async function depsValid(deps: readonly SourceDep[], io: DepsIo): Promise<boolean> {
-  for (const d of deps) {
-    if (io.isDirty(d.uri)) {
-      return false;
-    }
-  }
   if (deps.length === 0) {
     return true;
+  }
+  const dirtyFlags = await Promise.all(deps.map((d) => io.isDirty(d.uri)));
+  if (dirtyFlags.some(Boolean)) {
+    return false;
   }
   const stats = await Promise.all(deps.map((d) => io.stat(d.uri).catch(() => undefined)));
   for (let i = 0; i < deps.length; i++) {

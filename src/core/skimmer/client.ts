@@ -62,17 +62,32 @@ export class SkimmerClient {
   }
 
   ensureStarted(): void {
-    if (this.disposed || !this.d.options().enabled || this.session || this.starting || this.closing || this.blocked) {
-      return;
+    void this.waitUntilReady();
+  }
+
+  /** 启动并等待当前连接就绪；不可用或启动失败时返回 false。 */
+  async waitUntilReady(): Promise<boolean> {
+    if (this.disposed || !this.d.options().enabled || this.blocked) {
+      return false;
     }
-    if (Date.now() < this.retryAt || this.attempts >= 3) {
-      return;
+    if (this.session) {
+      return true;
     }
-    this.attempts++;
-    const generation = this.generation;
-    this.starting = this.start(generation).finally(() => {
-      this.starting = undefined;
-    });
+    if (this.closing) {
+      return false;
+    }
+    if (!this.starting) {
+      if (Date.now() < this.retryAt || this.attempts >= 3) {
+        return false;
+      }
+      this.attempts++;
+      const generation = this.generation;
+      this.starting = this.start(generation).finally(() => {
+        this.starting = undefined;
+      });
+    }
+    await this.starting;
+    return this.session !== undefined;
   }
 
   private async start(generation: number): Promise<void> {
@@ -209,13 +224,18 @@ export class SkimmerClient {
     this.d.status(text);
   }
 
-  async query(input: CompletionContextRequest, deadlineAt: number): Promise<CompletionContextResponse | undefined> {
+  async query(
+    input: CompletionContextRequest,
+    deadlineAt: number,
+    options?: { silent?: boolean },
+  ): Promise<CompletionContextResponse | undefined> {
     this.ensureStarted();
     const session = this.session;
     const remaining = deadlineAt - Date.now();
     if (!session || this.querying || remaining <= 0 || Date.now() < this.queryPauseUntil) {
       return undefined;
     }
+    const silent = options?.silent === true;
     this.querying = true;
     const startedAt = Date.now();
     const record: SkimmerQueryRecord = {
@@ -319,7 +339,9 @@ export class SkimmerClient {
         record.outcome = 'timeout';
       }
       record.elapsedMs = Math.max(0, Date.now() - startedAt);
-      this.d.onQuery?.(record);
+      if (!silent) {
+        this.d.onQuery?.(record);
+      }
     }
   }
 

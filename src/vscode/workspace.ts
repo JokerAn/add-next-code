@@ -202,7 +202,26 @@ async function readVueMajor(file: string): Promise<number | undefined | 'none'> 
   }
 }
 
-/** 来源依赖复核用的 IO：stat 取指纹；未保存状态取自本窗口已打开的文档。 */
+/** 缓存已解析过的真实路径，避免重复 realpath 系统调用。 */
+const realpathMemo = new Map<string, string>();
+async function cachedRealpath(fsPath: string): Promise<string | undefined> {
+  const hit = realpathMemo.get(fsPath);
+  if (hit !== undefined) {
+    return hit;
+  }
+  try {
+    const resolved = await fs.promises.realpath(fsPath);
+    realpathMemo.set(fsPath, resolved);
+    if (realpathMemo.size > 256) {
+      realpathMemo.delete(realpathMemo.keys().next().value as string);
+    }
+    return resolved;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 来源依赖复核用的 IO：stat 取指纹；未保存状态取自本窗口已打开的文档（全异步，无同步阻塞）。 */
 export const depsIo: DepsIo = {
   async stat(uriString) {
     const uri = vscode.Uri.parse(uriString);
@@ -216,7 +235,7 @@ export const depsIo: DepsIo = {
       return undefined;
     }
   },
-  isDirty(uriString) {
+  async isDirty(uriString) {
     const target = vscode.Uri.parse(uriString);
     for (const d of vscode.workspace.textDocuments) {
       if (d.isDirty) {
@@ -225,12 +244,12 @@ export const depsIo: DepsIo = {
         }
         if ((d.uri.scheme === 'file' || d.uri.scheme === 'vscode-remote') &&
           (target.scheme === 'file' || target.scheme === 'vscode-remote')) {
-          try {
-            if (fs.realpathSync(d.uri.fsPath) === target.fsPath) {
-              return true;
-            }
-          } catch {
-            // 未保存新文件没有磁盘实例；精确 URI 比较已在上方处理。
+          if (d.uri.fsPath === target.fsPath) {
+            return true;
+          }
+          const real = await cachedRealpath(d.uri.fsPath);
+          if (real !== undefined && real === target.fsPath) {
+            return true;
           }
         }
       }

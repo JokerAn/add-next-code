@@ -1,6 +1,6 @@
 // 未提交改动（git diff HEAD）作为上下文：只取与光标处相关的改动块，设硬上限。纯函数，不执行 git。
 // 背景：Continue 的补全曾把整份 diff 放进提示词，后来禁用，原因是 diff 通常太大、把其他上下文挤掉。
-import { tokenMatches, tokensOf, type Query } from './snippets';
+import { subTokensOf, tokenMatches, tokensOf, type Query } from './snippets';
 
 export interface DiffHunk {
   /** 仓库内的相对路径（新文件名） */
@@ -91,7 +91,10 @@ export interface RankInput {
  */
 export function rankDiffHunks(input: RankInput): DiffHunk[] {
   const { hunks, query } = input;
-  const tokens = hunks.map((hunk) => tokensOf(hunk.lines.join('\n'), query.phrases));
+  const tokens = hunks.map((hunk) => {
+    const joined = hunk.lines.join('\n');
+    return [...new Set([...tokensOf(joined, query.phrases), ...subTokensOf(joined)])];
+  });
   const scored: Array<{ hunk: DiffHunk; score: number }> = [];
   const matched: string[][] = hunks.map(() => []);
   const frequency = new Map<string, number>();

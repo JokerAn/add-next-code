@@ -54,6 +54,34 @@ function size(e: CacheEntry): number {
   return e.prefix.length + e.suffix.length + e.completion.length;
 }
 
+/**
+ * 后文窗口兼容性比较：
+ * 1. 完全相等直接通过；
+ * 2. 当用户手动敲入多行补全并换行时，光标下移会导致 readSuffix 底部多读入后续行（q.suffix 比 e.suffix 长），
+ *    或首行空白在回车自动缩进后发生细微变化。只要两边至少有一方非空、且短的一方是长的一方的精确前缀（在换行边界对齐），
+ *    就说明光标之后的已有代码并未被实质修改，允许续显。
+ */
+function suffixCompatible(current: string, cached: string, typedNewlines: number): boolean {
+  if (current === cached) {
+    return true;
+  }
+  if (typedNewlines <= 0) {
+    return false;
+  }
+  // 去掉首行光标紧邻处的纯行内空白差异（例如回车后编辑器自动留下的尾随空格）
+  const norm = (s: string) => s.replace(/^[ \t]+(?=\n|$)/, '');
+  const cur = norm(current);
+  const old = norm(cached);
+  if (cur === old) {
+    return true;
+  }
+  const [shorter, longer] = cur.length <= old.length ? [cur, old] : [old, cur];
+  if (shorter === '') {
+    return false;
+  }
+  return longer.startsWith(shorter) && (longer[shorter.length] === '\n' || shorter.endsWith('\n'));
+}
+
 export class CompletionCache {
   private readonly opts: CacheOptions;
   private readonly now: () => number;
@@ -100,7 +128,8 @@ export class CompletionCache {
       ) {
         continue;
       }
-      if (q.suffix !== e.suffix) {
+      const typedNewlines = q.cursorLine - e.anchorLine;
+      if (!suffixCompatible(q.suffix, e.suffix, typedNewlines)) {
         continue;
       }
       // 达到这个上限就已不可能有剩余预测，无需继续读取。

@@ -67,6 +67,9 @@ export function focusQueryAt(before: string): FocusQuery | undefined {
 }
 
 export function fullText(source: TextSource): string {
+  if (source.getText) {
+    return source.getText(MAX_SCAN_CHARS);
+  }
   const parts: string[] = [];
   let used = 0;
   for (let line = 0; line < source.lineCount && used < MAX_SCAN_CHARS; line++) {
@@ -260,7 +263,7 @@ export function renderFocus(query: FocusQuery, candidates: Candidate[]): { text:
 }
 
 /** 补全里出现的属性名有多少个在文件里从未出现过，用于观察"编造成员"的比例；只返回计数。 */
-export function countNewProps(completion: string, source: TextSource): { props: number; fresh: number } {
+export function countNewProps(completion: string, sourceOrText: TextSource | string): { props: number; fresh: number } {
   const names = new Set<string>();
   for (const match of completion.matchAll(new RegExp(`\\.\\s*(${IDENT})`, 'g'))) {
     if ((match[1] as string).length >= 3) {
@@ -270,7 +273,7 @@ export function countNewProps(completion: string, source: TextSource): { props: 
   if (names.size === 0) {
     return { props: 0, fresh: 0 };
   }
-  const text = fullText(source);
+  const text = typeof sourceOrText === 'string' ? sourceOrText : fullText(sourceOrText);
   let fresh = 0;
   for (const name of names) {
     if (!new RegExp(`(?<![\\w$])${escapeRe(name)}(?![\\w$])`).test(text)) {
@@ -321,6 +324,57 @@ export function inventedMembers(completion: string, fileText: string, evidence =
       !new RegExp(`(?<![\\w$])${escapeRe(ref)}(?:['"]\\s*\\])?\\s*\\??\\.\\s*${escapeRe(method)}(?![\\w$])`).test(fileText) &&
       refIsLocalComponent(fileText, ref)) {
       out.add(`${ref}.${method}`);
+    }
+  }
+  return [...out];
+}
+
+/**
+ * 当补全里遍历了同文件 React `useState` 声明的数组状态（如 `xiaojinkuList.find((item: any) => item.code === ...)`），
+ * 检查回调形参 `item` 上访问的属性名是否在该状态对应的 `setter(...)` 写入块里出现过。
+ * 用于在模型未看到状态写入块而猜错元素字段名时，触发一次带草稿线索的二次检索重发（仅作重发提示，不作硬截断）。
+ */
+export function unverifiedStateItemProps(completion: string, fileText: string): string[] {
+  const setters = new Map<string, string>();
+  const stateRe = /(?:const|let)\s*\[\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\]\s*=\s*(?:React\.)?useState\b/g;
+  for (const m of fileText.matchAll(stateRe)) {
+    setters.set(m[1] as string, m[2] as string);
+  }
+  if (setters.size === 0) {
+    return [];
+  }
+  const iterRe = new RegExp(
+    `(${IDENT})\\s*\\??\\.\\s*(?:find|findIndex|filter|map|some|every|forEach)\\s*\\(\\s*(?:\\(\\s*(${IDENT})(?:\\s*:[^)]*)?\\s*\\)|(${IDENT}))\\s*=>`,
+    'g',
+  );
+  const ARRAY_BUILTINS = new Set(['slice', 'length', 'toString', 'trim', 'includes', 'replace', 'split', 'join']);
+  const out = new Set<string>();
+  for (const m of completion.matchAll(iterRe)) {
+    const listName = m[1] as string;
+    const param = (m[2] ?? m[3]) as string;
+    const setter = setters.get(listName);
+    if (!setter) {
+      continue;
+    }
+    // 只看该状态对应的 setter(...) 在文件里所有实际写入块（不把无关 header 混入，避免 header 里的 "file: ..." 等字样误放行 item.file）
+    const writeChunks: string[] = [];
+    const callRe = new RegExp(`(?<![\\w$.])${escapeRe(setter)}\\s*\\(`, 'g');
+    for (const cm of fileText.matchAll(callRe)) {
+      writeChunks.push(fileText.slice(cm.index, cm.index + 1200));
+    }
+    if (writeChunks.length === 0) {
+      continue;
+    }
+    const writeCorpus = writeChunks.join('\n');
+    const propRe = new RegExp(`(?<![\\w$.])${escapeRe(param)}\\s*\\??\\.\\s*(${IDENT})`, 'g');
+    for (const pm of completion.slice(m.index).matchAll(propRe)) {
+      const prop = pm[1] as string;
+      if (ARRAY_BUILTINS.has(prop)) {
+        continue;
+      }
+      if (!new RegExp(`(?<![\\w$])${escapeRe(prop)}(?![\\w$])`).test(writeCorpus)) {
+        out.add(`${param}.${prop}`);
+      }
     }
   }
   return [...out];

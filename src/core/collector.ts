@@ -3,6 +3,7 @@ import { extractIdentifiers } from './identifiers';
 import { renderHeader, type HeaderStyle } from './header';
 import { detectFramework } from './framework';
 import { findSfcBlocks, hasScriptSetup, regionAt, type SfcBlock } from './sfc';
+import { queryOf, type Query } from './snippets';
 import type { ChangeItem, Config, Framework, Header, Member, Region, RelatedItem, TextSource } from './types';
 import { EMPTY_HEADER } from './types';
 
@@ -35,6 +36,8 @@ export interface SourceResult {
   snippets?: string[];
   /** 未提交的改动块 */
   changes?: ChangeItem[];
+  /** 其他已打开文档（含未跟踪新文件与参照文件）的相关片段 */
+  openTabs?: ChangeItem[];
   /** 实验：要放到光标上方而不是头部的参照代码 */
   nearSnippets?: string[];
   /** 来源自报的框架（Skimmer 可用时以它为准） */
@@ -52,6 +55,8 @@ export interface SourceContext extends CollectInput {
   framework: Framework;
   region: Region;
   identifiers: string[];
+  /** 光标处提取的检索词与中文词组，供 snippets / gitDiff / openTabs 共享，避免重复计算 */
+  query?: Query;
   sfcBlocks?: SfcBlock[];
   /** 最近 package.json 中已核实的 Vue 主版本，未知时不推测。 */
   projectVueMajor?: 2 | 3;
@@ -152,8 +157,9 @@ export function createCollector(deps: CollectorDeps) {
       scriptText,
     });
     const identifiers = extractIdentifiers(input.source, input.line, input.character);
+    const query = queryOf(input.source, input.line, input.hint);
     const ctx: SourceContext = {
-      ...input, framework, region, identifiers,
+      ...input, framework, region, identifiers, query,
       ...(input.languageId === 'vue' ? { sfcBlocks: blocks } : {}),
       ...(vueMajor === 2 || vueMajor === 3 ? { projectVueMajor: vueMajor } : {}),
     };
@@ -164,6 +170,7 @@ export function createCollector(deps: CollectorDeps) {
     const focus: string[] = [];
     const snippets: string[] = [];
     const changes: ChangeItem[] = [];
+    const openTabs: ChangeItem[] = [];
     const near: string[] = [];
     let reported: Framework | undefined;
 
@@ -187,6 +194,7 @@ export function createCollector(deps: CollectorDeps) {
         }
         snippets.push(...(r.value.snippets ?? []));
         changes.push(...(r.value.changes ?? []));
+        openTabs.push(...(r.value.openTabs ?? []));
         near.push(...(r.value.nearSnippets ?? []));
         reported = reported ?? r.value.framework;
       }),
@@ -203,10 +211,17 @@ export function createCollector(deps: CollectorDeps) {
       return true;
     });
 
+    // 去重：已在 gitDiff 里出现的同文件同内容不再在 openTabs 里重复展示
+    const changeTexts = new Set(changes.map((c) => c.text));
+    const filteredOpenTabs = openTabs.filter((item) => !changeTexts.has(item.text));
+
     // 已核实的项目版本与 script setup 优先；旧服务的语法猜测不能覆盖项目版本。
     const finalFramework = input.languageId === 'vue' && (scriptSetup || vueMajor === 2 || vueMajor === 3)
       ? framework : reported ?? framework;
-    if (members.length === 0 && relatedItems.length === 0 && focus.length === 0 && snippets.length === 0 && changes.length === 0) {
+    if (
+      members.length === 0 && relatedItems.length === 0 && focus.length === 0 &&
+      snippets.length === 0 && changes.length === 0 && filteredOpenTabs.length === 0
+    ) {
       return { header: EMPTY_HEADER, framework: finalFramework, region, status, near, evidence: [] };
     }
     const style = headerStyleAt(input, blocks);
@@ -231,6 +246,7 @@ export function createCollector(deps: CollectorDeps) {
       related: relatedItems,
       windowText: input.windowText,
       changes,
+      openTabs: filteredOpenTabs,
       snippets,
       focus,
       style,

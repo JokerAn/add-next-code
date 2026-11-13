@@ -6,6 +6,8 @@ export interface PostprocessInput {
   prefix: string;
   suffix: string;
   maxLines: number;
+  /** 手动触发时为 true；自动触发下若光标不在注释中而结果全是注释行，予以拦截 */
+  manual?: boolean;
 }
 
 const CONTROL_MARK_RE = /<[｜|][^｜|>\n]*[｜|]>/g;
@@ -169,6 +171,20 @@ function apply(input: PostprocessInput, hit: (rule: string) => void): string {
   const isComment = (l: string) => /^(\/\/|\/\*|\*|#|<!--)/.test(l);
   const closer = /^[)\]}]/;
   const code = head.filter((l) => !isComment(l));
+
+  // 5z. 光标停在非空代码行末尾（例如刚采纳完语句停在 `;` 后）时，自动触发另起一行只补纯注释而无任何代码行：
+  // 既无实用价值，采纳后还易诱导下一轮凭注释硬凑废代码。空行起笔或注释行内不拦截。
+  if (
+    !input.manual &&
+    code.length === 0 &&
+    head.length > 0 &&
+    currentLine.trim() !== '' &&
+    !isComment(currentLine.trim()) &&
+    (lines[0] ?? '').trim() === ''
+  ) {
+    hit('commentOnly');
+    return '';
+  }
   const recent = input.prefix.split('\n').map((l) => l.trim()).filter((l) => l !== '' && !isComment(l)).slice(-40);
   if (code.length >= 4) {
     for (let j = 0; j + code.length <= recent.length; j++) {

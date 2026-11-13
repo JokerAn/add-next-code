@@ -14,6 +14,8 @@ export interface HeaderInput {
   windowText: string;
   /** 未提交的改动块，每段多行；排在成员之后（内容相对稳定），超预算时在片段之后、从末尾开始丢 */
   changes?: ChangeItem[];
+  /** 其他已打开文档（含未跟踪新文件与参照文件）的相关片段 */
+  openTabs?: ChangeItem[];
   /** 同文件里窗口之外的相关代码片段，每段多行；超预算时在成员之后、从末尾开始丢 */
   snippets?: string[];
   /** 针对光标处表达式的候选名字行；排在最后，裁剪时最后才丢 */
@@ -85,8 +87,9 @@ export function renderHeader(input: HeaderInput): Header {
   const focus = input.focus ?? [];
   let snippets = input.snippets ?? [];
   let changes = input.changes ?? [];
+  let openTabs = input.openTabs ?? [];
   const hasExtra = input.members.length > 0 || input.related.length > 0 || focus.length > 0 || snippets.length > 0 ||
-    changes.length > 0;
+    changes.length > 0 || openTabs.length > 0;
   if (!hasExtra) {
     return EMPTY_HEADER;
   }
@@ -103,6 +106,12 @@ export function renderHeader(input: HeaderInput): Header {
       lines.push('uncommitted changes in this project (new code, most relevant parts):');
       for (const change of changes) {
         lines.push(...change.text.split('\n'), '...');
+      }
+    }
+    if (openTabs.length > 0) {
+      lines.push('related code in open files:');
+      for (const tab of openTabs) {
+        lines.push(...tab.text.split('\n'), '...');
       }
     }
     for (const r of rel) {
@@ -127,10 +136,15 @@ export function renderHeader(input: HeaderInput): Header {
         deps.push(change.dep);
       }
     }
+    for (const tab of openTabs) {
+      if (tab.dep && !deps.some((dep) => dep.uri === tab.dep?.uri)) {
+        deps.push(tab.dep);
+      }
+    }
     return { text: wrap(lines, input.style), deps };
   };
 
-  // 预算裁剪：先删关联项（从末尾），再删窗口里没出现的成员，再删整个 members 行，file 行最后丢。
+  // 预算裁剪：先删关联项（从末尾），再删窗口里没出现的成员，再删整个 members 行，再依次删 openTabs / snippets / changes。
   let rel = related;
   let current = build(rel, members, true);
   while (current.text.length > input.budgetChars && rel.length > 0) {
@@ -142,6 +156,10 @@ export function renderHeader(input: HeaderInput): Header {
     current = build(rel, members, true);
   }
   if (current.text.length > input.budgetChars) {
+    current = build(rel, members, false);
+  }
+  while (current.text.length > input.budgetChars && openTabs.length > 0) {
+    openTabs = openTabs.slice(0, -1);
     current = build(rel, members, false);
   }
   while (current.text.length > input.budgetChars && snippets.length > 0) {

@@ -2,7 +2,7 @@
   "name": "add-next-code",
   "displayName": "Add Next Code (FIM)",
   "description": "VS Code 行内 FIM 代码补全：直连 DeepSeek 原生 FIM 接口，成本优先。",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "jokeran",
   "private": true,
   "license": "UNLICENSED",
@@ -64,6 +64,10 @@
       {
         "command": "addNextCode.restartSkimmer",
         "title": "Add Next Code: 重启 Skimmer 增强"
+      },
+      {
+        "command": "addNextCode.showMenu",
+        "title": "Add Next Code: 打开快捷菜单"
       }
     ],
     "configuration": {
@@ -105,6 +109,11 @@
           "minimum": 300,
           "maximum": 5000,
           "description": "停笔多久后自动触发（毫秒）。"
+        },
+        "addNextCode.trigger.adaptiveDebounce": {
+          "type": "boolean",
+          "default": true,
+          "description": "在意图注释回车、刚打开代码块回车、属性链点号（如 this.）等高确定性位置自动缩短停笔等待（最低 350ms）。"
         },
         "addNextCode.trigger.minIntervalMs": {
           "type": "number",
@@ -195,6 +204,11 @@
           "type": "boolean",
           "default": true,
           "description": "把未提交的改动（git diff HEAD）里与光标处相关的改动块放进提示词，最多 6 块、约 1600 字符。当前文件的改动总是候选，其他文件的改动必须与光标附近的名字有交集；被 .gitignore 或 addNextCode.exclude 匹配的文件、有未保存修改的其他文件不会进入。需要本机可执行 git。"
+        },
+        "addNextCode.context.openTabs": {
+          "type": "boolean",
+          "default": true,
+          "description": "从本窗口其他已打开、同工作区且已保存的文档（含尚未 git add 的新文件与参照文件）中，取与光标处强相关的代码片段放进提示词，最多 3 段、约 1200 字符；同样遵守 .gitignore 与 addNextCode.exclude。"
         },
         "addNextCode.experimental.referenceNearCursor": {
           "type": "boolean",

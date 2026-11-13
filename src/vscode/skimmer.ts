@@ -31,10 +31,14 @@ export interface SkimmerSourceDeps {
   onQuery?(record: SkimmerQueryRecord): void;
 }
 
+const WARM_LANGUAGES = new Set(['vue', 'javascript', 'typescript', 'javascriptreact', 'typescriptreact']);
+
 /** 只在通过防抖后的 collector 内调用，基础模式不依赖这个来源。 */
 export class SkimmerSource implements ContextSource, vscode.Disposable {
   readonly name = 'skimmer';
   private readonly client: SkimmerClient;
+  private readonly warmed = new Set<string>();
+  private warmTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private readonly d: SkimmerSourceDeps) {
     this.client = new SkimmerClient({
@@ -51,7 +55,79 @@ export class SkimmerSource implements ContextSource, vscode.Disposable {
   }
 
   restart(): Promise<void> {
+    this.warmed.clear();
+    if (this.warmTimer) {
+      clearTimeout(this.warmTimer);
+      this.warmTimer = undefined;
+    }
     return this.client.restart();
+  }
+
+  /**
+   * 空闲预热：当用户启用了 Skimmer 并打开/切换到受支持的源文件时，延迟 1.5s 在后台静默启动并预热首份摘要。
+   * 解决首次敲 `this.` 等不完整语法时握手慢且尚无可用旧摘要的问题；不计入补全查询统计。
+   */
+  scheduleWarmup(document: vscode.TextDocument | undefined): void {
+    if (this.warmTimer) {
+      clearTimeout(this.warmTimer);
+      this.warmTimer = undefined;
+    }
+    const cfg = this.d.cfg();
+    if (!cfg.skimmerEnabled || !document || !WARM_LANGUAGES.has(document.languageId)) {
+      return;
+    }
+    if (document.uri.scheme !== 'file' && document.uri.scheme !== 'vscode-remote') {
+      return;
+    }
+    const docKey = document.uri.toString();
+    if (this.warmed.has(docKey)) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.warmTimer = undefined;
+      void this.warmup(document).catch(() => undefined);
+    }, 1500);
+    timer.unref?.();
+    this.warmTimer = timer;
+  }
+
+  private async warmup(document: vscode.TextDocument): Promise<void> {
+    const cfg = this.d.cfg();
+    if (!cfg.skimmerEnabled || document.isClosed) {
+      return;
+    }
+    const folder = vscode.workspace.getWorkspaceFolder(document.uri);
+    if (!folder || !(await this.d.gate.permits(document.uri))) {
+      return;
+    }
+    const project = await fs.realpath(folder.uri.fsPath).catch(() => undefined);
+    const canonical = await fs.realpath(document.uri.fsPath).catch(() => undefined);
+    if (!project || !canonical || !relative(project, canonical)) {
+      return;
+    }
+    if (!(await this.client.waitUntilReady?.()) && !this.client.ready) {
+      return;
+    }
+    const text = typeof document.getText === 'function' ? document.getText() : '';
+    if (!text || text.length > cfg.skimmerMaxDocumentChars) {
+      return;
+    }
+    this.warmed.add(document.uri.toString());
+    if (this.warmed.size > 32) {
+      this.warmed.delete(this.warmed.keys().next().value as string);
+    }
+    await this.client.query({
+      protocol: 1,
+      project_path: project,
+      file_path: canonical,
+      document: { text },
+      cursor: { line: 0, character: 0 },
+      identifiers: [],
+      dirty_files: [],
+      max_items: 1,
+      budget_chars: cfg.headerChars,
+      deadline_ms: 2000,
+    }, Date.now() + 2000, { silent: true });
   }
 
   async collect(ctx: SourceContext, deadlineAt: number): Promise<SourceResult | undefined> {
@@ -88,17 +164,28 @@ export class SkimmerSource implements ContextSource, vscode.Disposable {
     if (!document || document.version !== ctx.version) {
       return undefined;
     }
-    // 按字符数提前停止快照构造，不为极大文件先分配一份无界全文。
-    const lines: string[] = [];
-    let chars = 0;
-    for (let line = 0; line < ctx.source.lineCount; line++) {
-      const text = ctx.source.lineAt(line);
-      chars += text.length + (line > 0 ? 1 : 0);
-      if (chars > cfg.skimmerMaxDocumentChars) {
+    // 优先使用快速全文快照（长度超预算时提前中止）
+    let docText: string;
+    if (ctx.source.getText) {
+      const full = ctx.source.getText(cfg.skimmerMaxDocumentChars + 1);
+      if (full.length > cfg.skimmerMaxDocumentChars) {
         this.d.status('仅基础模式：当前文件超过 Skimmer 快照预算');
         return { status: 'document-too-large' };
       }
-      lines.push(text);
+      docText = full;
+    } else {
+      const lines: string[] = [];
+      let chars = 0;
+      for (let line = 0; line < ctx.source.lineCount; line++) {
+        const text = ctx.source.lineAt(line);
+        chars += text.length + (line > 0 ? 1 : 0);
+        if (chars > cfg.skimmerMaxDocumentChars) {
+          this.d.status('仅基础模式：当前文件超过 Skimmer 快照预算');
+          return { status: 'document-too-large' };
+        }
+        lines.push(text);
+      }
+      docText = lines.join('\n');
     }
     const dirty: string[] = [];
     for (const doc of vscode.workspace.textDocuments) {
@@ -113,7 +200,7 @@ export class SkimmerSource implements ContextSource, vscode.Disposable {
     const data = await this.client.query({
       protocol: 1, project_path: project, file_path: canonical,
       ...(ctx.projectVueMajor ? { vue_major: ctx.projectVueMajor } : {}),
-      document: { text: lines.join('\n') },
+      document: { text: docText },
       cursor: { line: ctx.line, character: ctx.character },
       identifiers: ctx.identifiers.slice(0, 20), dirty_files: dirty,
       max_items: 8, budget_chars: cfg.headerChars,
@@ -183,6 +270,10 @@ export class SkimmerSource implements ContextSource, vscode.Disposable {
   }
 
   dispose(): Promise<void> {
+    if (this.warmTimer) {
+      clearTimeout(this.warmTimer);
+      this.warmTimer = undefined;
+    }
     return this.client.dispose();
   }
 }

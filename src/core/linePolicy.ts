@@ -13,6 +13,87 @@ const COMMENT_END = /(\*\/|-->)$/;
 const BLOCK_OPENER = /(\{|\(|\[|=>|:)$/;
 /** 未自闭合的开始标签结尾，如 <div class="a">、<template> */
 const TAG_OPENER = /<[A-Za-z][^<>]*[^/<>]>$|<[A-Za-z]>$/;
+/** 已带分号的终止语句（return / continue / break / throw） */
+const TERMINAL_STMT = /^(?:return|continue|break|throw)\b.*;$/;
+
+function nextNonEmptySuffixLine(suffix: string): { text: string; indent: number } | undefined {
+  const nl = suffix.indexOf('\n');
+  if (nl < 0) {
+    return undefined;
+  }
+  const lines = suffix.slice(nl + 1).split('\n');
+  for (const raw of lines) {
+    const text = raw.trim();
+    if (text !== '') {
+      return { text, indent: (/^[ \t]*/.exec(raw) as RegExpExecArray)[0].length };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 判断自动触发时是否应跳过请求（手动触发不受影响）：
+ * 1. 光标停在完整终止语句（`return ...;` / `continue;` / `break;` / `throw ...;`）行尾且本行括号已配平；
+ * 2. 光标在空行上，上一非空行是同缩进（或更深）的终止语句，且下一非空行是闭合 `}`（不可达死代码区）；
+ * 3. 光标停在以 `;` 结尾且本行括号已配平的完整语句行尾，同时紧邻的下一非空行是缩进更浅的块闭合 `}`（如刚采纳完块尾代码停在 `;` 后）。
+ */
+export function shouldSkipAutoTrigger(prefix: string, suffix: string): boolean {
+  const nl = suffix.indexOf('\n');
+  const rest = nl < 0 ? suffix : suffix.slice(0, nl);
+  if (rest.trim() !== '') {
+    return false;
+  }
+  const lineStart = prefix.lastIndexOf('\n') + 1;
+  const currentLine = prefix.slice(lineStart);
+  const currentIndent = (/^[ \t]*/.exec(currentLine) as RegExpExecArray)[0].length;
+  const trimmed = currentLine.trim();
+
+  if (trimmed !== '') {
+    if (COMMENT_START.test(trimmed) || !trimmed.endsWith(';') || netDepth(currentLine) !== 0) {
+      return false;
+    }
+    if (TERMINAL_STMT.test(trimmed)) {
+      return true;
+    }
+    const next = nextNonEmptySuffixLine(suffix);
+    if (next && /^\}/.test(next.text) && next.indent < currentIndent) {
+      return true;
+    }
+    return false;
+  }
+
+  // 空行：上一非空行是已结束的终止语句，且下一非空行是闭合花括号
+  const prev = prefix.slice(0, lineStart).trimEnd();
+  if (prev === '') {
+    return false;
+  }
+  const prevLine = prev.slice(prev.lastIndexOf('\n') + 1);
+  const prevTrimmed = prevLine.trim();
+  const prevIndent = (/^[ \t]*/.exec(prevLine) as RegExpExecArray)[0].length;
+  if (!TERMINAL_STMT.test(prevTrimmed) || prevIndent < currentIndent) {
+    return false;
+  }
+  const next = nextNonEmptySuffixLine(suffix);
+  return Boolean(next && /^\}/.test(next.text) && next.indent <= prevIndent);
+}
+
+/**
+ * 高确定性自动触发位置：
+ * - 空行紧跟在注释或刚打开的代码块之后（`lineMode === 'block'`）；
+ * - 光标前刚敲完点号属性访问（如 `this.`、`res.data?.`）。
+ * 此时将防抖缩短为 `max(300, min(debounceMs, round(debounceMs * 0.45)))`，普通位置保持原值。
+ */
+export function effectiveDebounceMs(debounceMs: number, adaptive: boolean, prefix: string, lineMode: LineMode): number {
+  if (!adaptive || debounceMs <= 350) {
+    return debounceMs;
+  }
+  const currentLine = prefix.slice(prefix.lastIndexOf('\n') + 1);
+  const afterDot = /[A-Za-z_$][\w$]*\??\.\s*$/.test(currentLine);
+  if (lineMode === 'block' || afterDot) {
+    return Math.max(300, Math.min(debounceMs, Math.round(debounceMs * 0.45)));
+  }
+  return debounceMs;
+}
 
 export function lineModeOf(prefix: string, suffix: string): LineMode {
   const nl = suffix.indexOf('\n');
@@ -33,20 +114,45 @@ export function lineModeOf(prefix: string, suffix: string): LineMode {
 }
 
 /**
- * 逐字符扫描括号深度，跳过字符串与行注释。单双引号字符串不跨行，模板字符串可跨行。
+ * 逐字符扫描括号深度，跳过字符串、行注释、块注释，并识别模板字符串插值 `${...}`。
+ * 单双引号字符串不跨行，模板字符串与块注释可跨行；换行符始终会通知 visit。
  * visit 返回 false 时停止。
  */
 function walk(text: string, visit: (i: number, ch: string, depth: number, quote: string) => boolean | void): void {
   let depth = 0;
   let quote = '';
+  let inBlockComment = false;
+  // 模板插值 `${...}` 开始时的外层括号深度栈：花括号回落到该深度时恢复反引号字符串模式
+  const tplDepths: number[] = [];
   for (let i = 0; i < text.length; i++) {
     const ch = text[i] as string;
+    if (inBlockComment) {
+      if (ch === '*' && text[i + 1] === '/') {
+        inBlockComment = false;
+        i++;
+        continue;
+      }
+      if (ch === '\n' && visit(i, ch, depth, '/*') === false) {
+        return;
+      }
+      continue;
+    }
     if (ch === '\n' && quote !== '`') {
       quote = '';
     }
     if (quote) {
       if (ch === '\\') {
         i++;
+        continue;
+      }
+      if (quote === '`' && ch === '$' && text[i + 1] === '{') {
+        tplDepths.push(depth);
+        depth++;
+        quote = '';
+        i++;
+        if (visit(i, '{', depth, '') === false) {
+          return;
+        }
         continue;
       }
       if (ch === quote) {
@@ -61,10 +167,18 @@ function walk(text: string, visit: (i: number, ch: string, depth: number, quote:
       }
       i = end - 1;
       continue;
+    } else if (ch === '/' && text[i + 1] === '*') {
+      inBlockComment = true;
+      i++;
+      continue;
     } else if (ch === '(' || ch === '[' || ch === '{') {
       depth++;
     } else if (ch === ')' || ch === ']' || ch === '}') {
       depth--;
+      if (ch === '}' && tplDepths.length > 0 && depth === tplDepths[tplDepths.length - 1]) {
+        tplDepths.pop();
+        quote = '`';
+      }
     }
     if (visit(i, ch, depth, quote) === false) {
       return;

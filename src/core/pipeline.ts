@@ -6,16 +6,16 @@ import type { FimClient, FimResult } from './fim/client';
 import { FimError } from './fim/errors';
 import { buildFimRequest, isSingleLineMode, modelKeyOf } from './fim/prompt';
 import type { HealthState } from './backoff';
-import { cutBalanced, cutStatement, lineModeOf } from './linePolicy';
+import { cutBalanced, cutStatement, effectiveDebounceMs, lineModeOf, shouldSkipAutoTrigger } from './linePolicy';
 import type { Metrics, Outcome, CacheState, CallRecord } from './metrics';
-import { enclosingOpeners } from './blockAnchor';
+import { enclosingOpeners, isNamedFunctionOpener } from './blockAnchor';
 import { insertReference } from './nearCursor';
 import { intentComment } from './snippets';
 import { postprocessTraced } from './postprocess';
 import { estimateCost } from './pricing';
 import type { Scheduler } from './scheduler';
 import { sleepUntil } from './time';
-import { countNewProps, cutAtMembers, fixRedeclare, focusQueryAt, fullText, inventedMembers } from './usage';
+import { countNewProps, cutAtMembers, fixRedeclare, focusQueryAt, fullText, inventedMembers, unverifiedStateItemProps } from './usage';
 import type { CancelToken, Config, Header, Position, SelectedInfo, TextSource, TriggerKind } from './types';
 import { EMPTY_HEADER } from './types';
 import { buildWindow, cursorOf, readPrefix, type WindowResult } from './window';
@@ -87,6 +87,8 @@ const MEMO_ANCHOR_SPAN = 150;
 export class CompletionPipeline {
   private seq = 0;
   private readonly headerMemo = new Map<string, HeaderMemo>();
+  /** 文档 key → 最近一次扫描出的非空行集合（用于 O(1) 校验头部 evidence 是否仍在） */
+  private readonly lineSetMemo = new Map<string, { version: number; present: Set<string> }>();
   /** 请求键 → 被拒绝的时间与所属文档。temperature 为 0 时同样的提示词得到同样的结果，没必要再问一次 */
   private readonly rejected = new Map<string, { at: number; doc: string }>();
   private generation = 0;
@@ -99,6 +101,7 @@ export class CompletionPipeline {
   invalidate(): void {
     this.generation++;
     this.headerMemo.clear();
+    this.lineSetMemo.clear();
     this.rejected.clear();
     this.d.scheduler.abortAll();
   }
@@ -108,6 +111,7 @@ export class CompletionPipeline {
     this.d.cache.dropDoc(docKey);
     this.lastAutoSentAt.delete(docKey);
     this.headerMemo.delete(docKey);
+    this.lineSetMemo.delete(docKey);
     for (const [key, entry] of this.rejected) {
       if (entry.doc === docKey) {
         this.rejected.delete(key);
@@ -116,8 +120,8 @@ export class CompletionPipeline {
   }
 
   /** onDidChangeTextDocument：只做缓存条目筛选，不读取文本 */
-  onDocumentChanged(docKey: string, changeStartLines: number[]): void {
-    dropEntriesAffectedByChange(this.d.cache, docKey, changeStartLines);
+  onDocumentChanged(docKey: string, changeLines: number[]): void {
+    dropEntriesAffectedByChange(this.d.cache, docKey, changeLines);
   }
 
   /**
@@ -148,15 +152,31 @@ export class CompletionPipeline {
       if (!above.some((text) => text.trim() === memo.anchor)) {
         return drop();
       }
-    } else if (!openers.includes(memo.anchor)) {
-      return drop();
+    } else {
+      const idx = openers.indexOf(memo.anchor);
+      if (idx < 0 || openers.slice(0, idx).some(isNamedFunctionOpener)) {
+        return drop();
+      }
     }
     if (memo.outcome.evidence.length > 0) {
-      const present = new Set<string>();
-      for (let i = 0; i < doc.source.lineCount; i++) {
-        present.add(doc.source.lineAt(i).trim());
+      const ver = doc.version();
+      let cached = this.lineSetMemo.get(doc.key);
+      if (!cached || cached.version !== ver) {
+        const present = new Set<string>();
+        for (let i = 0; i < doc.source.lineCount; i++) {
+          const t = doc.source.lineAt(i).trim();
+          if (t !== '') {
+            present.add(t);
+          }
+        }
+        cached = { version: ver, present };
+        this.lineSetMemo.delete(doc.key);
+        this.lineSetMemo.set(doc.key, cached);
+        if (this.lineSetMemo.size > MEMO_MAX_DOCS) {
+          this.lineSetMemo.delete(this.lineSetMemo.keys().next().value as string);
+        }
       }
-      if (!memo.outcome.evidence.every((text) => present.has(text))) {
+      if (!memo.outcome.evidence.every((text) => cached.present.has(text))) {
         return drop();
       }
     }
@@ -257,9 +277,14 @@ export class CompletionPipeline {
       d.cache.drop(hit.entry);
     }
 
-    // ── 空行分级：信号最弱的位置只补一条语句，或在自动模式下不请求 ──
+    // ── 空行分级与行尾克制：信号最弱或已完整结束的位置只补一条语句，或在自动模式下不请求 ──
     const lineMode = cfg.blankLine === 'always' ? 'free' : lineModeOf(win.prefix, win.suffix);
-    if (!manual && (lineMode === 'empty' || (lineMode === 'statement' && cfg.blankLine === 'strict'))) {
+    if (
+      !manual &&
+      (lineMode === 'empty' ||
+        (lineMode === 'statement' && cfg.blankLine === 'strict') ||
+        (cfg.blankLine !== 'always' && shouldSkipAutoTrigger(win.prefix, win.suffix)))
+    ) {
       rec.mode = lineMode;
       return finish('skipped');
     }
@@ -274,8 +299,9 @@ export class CompletionPipeline {
     rec.stage = 'wait';
     const waitStart = Date.now();
     if (!manual) {
+      const waitMs = effectiveDebounceMs(cfg.debounceMs, cfg.adaptiveDebounce, win.prefix, lineMode);
       const sendAt = Math.max(
-        Date.now() + cfg.debounceMs,
+        Date.now() + waitMs,
         (this.lastAutoSentAt.get(req.doc.key) ?? 0) + cfg.minIntervalMs,
       );
       await sleepUntil(sendAt, req.token);
@@ -344,6 +370,7 @@ export class CompletionPipeline {
     rec.snippets = outcome.status['snippets'];
     rec.scope = outcome.status['scope'];
     rec.diff = outcome.status['gitdiff'];
+    rec.tabs = outcome.status['opentabs'];
     rec.tContext = Date.now() - ctxStart;
     rec.headerChars = header.text.length;
     if (!stillValid()) {
@@ -451,7 +478,7 @@ export class CompletionPipeline {
       // 非流式响应不经过流内截断，这里补一次
       const raw = (statement ? cutStatement(res.text) : cutBalanced(res.text, cfg.maxLines)) ?? res.text;
       const out = postprocessTraced({
-        text: raw, prefix: win.prefix, suffix: win.suffix, maxLines: statement ? cfg.maxLines : cfg.maxLines * 2,
+        text: raw, prefix: win.prefix, suffix: win.suffix, maxLines: statement ? cfg.maxLines : cfg.maxLines * 2, manual,
       });
       if (raw !== res.text) {
         out.rules.unshift(statement ? 'statement' : 'balanced');
@@ -472,14 +499,18 @@ export class CompletionPipeline {
     rec.rawChars = result.text.length;
     rec.rawLines = result.text.split('\n').length;
 
-    // ── 实例成员校验：补全里有本文件不存在的 this 成员时，以草稿为线索重新检索并重发一次 ──
+    // ── 实例成员与状态元素属性校验：补全里有本文件不存在的 this 成员或状态元素属性时，以草稿为线索重新检索并重发一次 ──
+    let cachedFileText: string | undefined;
+    const getFileText = () => (cachedFileText ??= fullText(req.doc.source));
     if (text && cfg.verifyMembers !== 'off') {
-      const fileText = fullText(req.doc.source);
-      let invented = inventedMembers(text, fileText, header.text);
-      if (invented.length > 0) {
+      const fileText = getFileText();
+      let hardInvented = inventedMembers(text, fileText, header.text);
+      const softStateProps = hardInvented.length === 0 ? unverifiedStateItemProps(text, fileText) : [];
+      let suspect = hardInvented.length > 0 ? hardInvented : softStateProps;
+      if (suspect.length > 0) {
         rec.stage = 'verify';
-        rec.draftInvented = invented.length;
-        dump('invented', invented.join(', '));
+        rec.draftInvented = suspect.length;
+        dump('invented', suspect.join(', '));
         const second = await d.collector({ ...collectInput, hint: text }, Date.now() + cfg.extraWaitMs);
         if (!stillValid()) {
           return finish(req.token.isCancellationRequested ? 'cancelled' : 'stale');
@@ -529,11 +560,15 @@ export class CompletionPipeline {
             }
             dump('retry raw', retried.text);
             const again = refine(retried);
-            const left = again.text ? inventedMembers(again.text, fileText, second.header.text) : invented;
-            if (again.text && left.length < invented.length) {
+            const nextHard = again.text ? inventedMembers(again.text, fileText, second.header.text) : hardInvented;
+            const nextSoft = again.text && nextHard.length === 0
+              ? unverifiedStateItemProps(again.text, fileText) : [];
+            const left = nextHard.length > 0 ? nextHard : nextSoft;
+            if (again.text && left.length < suspect.length) {
               processed = again;
               text = again.text;
-              invented = left;
+              hardInvented = nextHard;
+              suspect = left;
               header = second.header;
               rec.headerChars = header.text.length;
               rec.retry = 'better';
@@ -542,14 +577,14 @@ export class CompletionPipeline {
             }
           }
         }
-        if (invented.length > 0 && cfg.verifyMembers === 'strict') {
-          const kept = cutAtMembers(text, invented);
+        if (hardInvented.length > 0 && cfg.verifyMembers === 'strict') {
+          const kept = cutAtMembers(text, hardInvented);
           if (kept !== undefined) {
             text = kept;
             processed.rules.push('invented');
           }
         }
-        rec.invented = invented.length;
+        rec.invented = hardInvented.length > 0 ? hardInvented.length : suspect.length;
         rec.stage = 'post';
       }
     }
@@ -586,7 +621,7 @@ export class CompletionPipeline {
       completion: text,
       deps: header.deps,
     });
-    const props = countNewProps(text, req.doc.source);
+    const props = countNewProps(text, cachedFileText ?? req.doc.source);
     rec.props = props.props;
     rec.newProps = props.fresh;
     return done(text);

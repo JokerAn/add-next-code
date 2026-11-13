@@ -8,8 +8,15 @@ const MAX_LEVELS = 10;
 const MAX_SCAN_LINES = 400;
 const OPENER = /(?:[{(\[]|=>)$/;
 
+const FUNC_DECL = /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+[A-Za-z_$][\w$]*\s*\(|^(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)(?:\s*:[^=]+)?\s*=>/;
+
 function indentOf(text: string): number {
   return (/^[ \t]*/.exec(text) as RegExpExecArray)[0].length;
+}
+
+/** 这一行是否是具名函数或箭头函数变量的声明开头行（用于判断跨兄弟函数时不能沿用外层组件级旧头部） */
+export function isNamedFunctionOpener(trimmedLine: string): boolean {
+  return FUNC_DECL.test(trimmedLine);
 }
 
 /**

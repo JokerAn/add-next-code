@@ -93,6 +93,8 @@ export interface CallRecord {
   scope?: string;
   /** 未提交改动：形如 "选中块数/候选块数"；没有相关改动为 empty */
   diff?: string;
+  /** 其他打开文档片段：形如 "选中段数/候选文档数" */
+  tabs?: string;
   /** 草稿里、最终结果里本文件不存在的实例成员个数 */
   draftInvented?: number;
   invented?: number;
@@ -204,6 +206,7 @@ export class Metrics {
     const withFocus = requested.filter((r) => r.focus !== undefined && r.focus !== 'empty').length;
     const withSnippets = requested.filter((r) => r.snippets !== undefined && r.snippets !== 'empty').length;
     const withDiff = requested.filter((r) => r.diff !== undefined && r.diff !== 'empty' && r.diff !== 'timeout').length;
+    const withTabs = requested.filter((r) => r.tabs !== undefined && r.tabs !== 'empty' && r.tabs !== 'timeout').length;
     const negHit = rs.filter((r) => r.neg === 'hit').length;
     const negStored = rs.filter((r) => r.neg === 'stored').length;
     const hdrReuse = requested.filter((r) => r.hdr === 'reuse').length;
@@ -249,7 +252,7 @@ export class Metrics {
       `取消与过期原因：${tally(rs.flatMap((r) => (r.why ? [`${r.stage ?? '?'}/${r.why}`] : [])))}`,
       `行模式（实际请求）：${tally(requested.flatMap((r) => (r.mode ? [r.mode] : [])))}`,
       `后处理规则命中：${tally(rs.flatMap((r) => r.pp ?? []))}；模型有输出但被拒绝 ${rejected.length} 次`,
-      `文件内用法索引：${withFocus} / ${requested.length} 次请求带候选名字；相关片段：${withSnippets} / ${requested.length} 次请求带片段；未提交改动：${withDiff} / ${requested.length} 次请求带改动块`,
+      `文件内用法索引：${withFocus} / ${requested.length} 次请求带候选名字；相关片段：${withSnippets} / ${requested.length} 次请求带片段；未提交改动：${withDiff} / ${requested.length} 次请求带改动块；打开标签页：${withTabs} / ${requested.length} 次`,
       `成员校验：${drafts.length} 次草稿含本文件不存在的成员；重发结果 ${tally(drafts.flatMap((r) => (r.retry ? [r.retry] : [])))}；最终仍含 ${drafts.filter((r) => (r.invented ?? 0) > 0).length} 次（strict 下已截断）`,
       `展示内容里的属性名 ${propTotal} 个，其中本文件从未出现过的 ${propNew} 个`,
       `请求总耗时 p50/p95：${fmt(percentile(tot, 50))} / ${fmt(percentile(tot, 95))}`,

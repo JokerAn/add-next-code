@@ -32,9 +32,41 @@ const STOP = new Set([
   'refs', 'emit', 'nexttick', 'forceupdate', 'store', 'router', 'route',
 ]);
 
+/** 拆复合词时忽略的高频结构词缀，避免 get/list/item/value 等泛词冲淡真实业务词 */
+const SUB_STOP = new Set([
+  'handle', 'handler', 'change', 'click', 'select', 'selected', 'update', 'init', 'load', 'fetch', 'query', 'check',
+  'show', 'hide', 'open', 'close', 'visible', 'list', 'item', 'items', 'data', 'info', 'value', 'values', 'name', 'names',
+  'code', 'type', 'types', 'index', 'count', 'current', 'temp', 'flag', 'status', 'state', 'result', 'params', 'param',
+  'config', 'option', 'options', 'form', 'page', 'view', 'text', 'label', 'title', 'detail', 'details', 'last', 'first',
+  'next', 'prev', 'true', 'false', 'null',
+]);
+
 /** 大小写、连字符与下划线写法不同的同一个名字归一：skuListPop / skulist-pop → skulistpop */
 function normalize(token: string): string {
   return token.replace(/[-_$]/g, '').toLowerCase();
+}
+
+/** 从驼峰、下划线、连字符复合标识符中拆出有业务区分度的子词（如 getBankNumLast4 → bank） */
+export function subTokensOf(text: string): string[] {
+  const out = new Set<string>();
+  for (const match of text.matchAll(TOKEN_RE)) {
+    const raw = match[0];
+    const whole = normalize(raw);
+    const parts = raw
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+      .split(/[-_$\s0-9]+/);
+    if (parts.length < 2) {
+      continue;
+    }
+    for (const part of parts) {
+      const sub = part.toLowerCase();
+      if (sub.length >= MIN_TOKEN && sub !== whole && !STOP.has(sub) && !SUB_STOP.has(sub)) {
+        out.add(sub);
+      }
+    }
+  }
+  return [...out];
 }
 
 /** 一段文字里所有连续 PHRASE 个中文字的片段 */
@@ -91,8 +123,10 @@ export interface Query {
  * 其次是紧挨光标的行，再远的行减半；草稿里的名字与紧挨的行同级。
  */
 /**
- * 光标上方说明意图的注释：光标行本身是注释，或从光标行向上跳过至多 3 个空行后紧接着的注释块。
- * 返回最靠近光标的那一行（去掉首尾空白）及其行号；没有、或太短（< 12 个字符，如 "// }"）时返回 undefined。
+ * 光标上方说明意图的注释：
+ * - 光标行本身是注释，或从光标行向上跳过至多 3 个空行后紧接着的注释块；
+ * - 或者光标刚进入一个新声明的函数/方法开头（上方 2 行内是函数声明），而该函数声明行正上方紧贴着文档注释/行注释。
+ * 返回最靠近光标（或函数声明）的那一行（去掉首尾空白）及其行号；没有、或太短（< 12 个字符，如 "// }"）时返回 undefined。
  */
 export function intentComment(source: TextSource, cursorLine: number): { text: string; line: number } | undefined {
   let line = cursorLine;
@@ -100,6 +134,15 @@ export function intentComment(source: TextSource, cursorLine: number): { text: s
     line--;
     while (line >= 0 && cursorLine - line <= 3 && source.lineAt(line).trim() === '') {
       line--;
+    }
+    if (line < 0 || !COMMENT_LINE.test(source.lineAt(line))) {
+      const fnHead = enclosingFunctionAt(source, cursorLine);
+      if (fnHead && cursorLine - fnHead.line <= 2) {
+        line = fnHead.line - 1;
+        while (line >= 0 && fnHead.line - line <= 2 && source.lineAt(line).trim() === '') {
+          line--;
+        }
+      }
     }
   }
   if (line < 0 || !COMMENT_LINE.test(source.lineAt(line))) {
@@ -109,31 +152,107 @@ export function intentComment(source: TextSource, cursorLine: number): { text: s
   return text.length >= 12 ? { text, line } : undefined;
 }
 
+const CALL_RE = /([A-Za-z_$][\w$]*)\s*\(/g;
+const DEFINITION_RE = /^\s*(?:async\s+)?(?:function\s+)?([A-Za-z_$][\w$]*)\s*\([^()]*\)(?:\s*:[^=]+)?\s*\{\s*$/;
+const ARROW_DEFINITION_RE = /^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)(?:\s*:[^=]+)?\s*=>/;
+const USE_STATE_RE = /^\s*(?:const|let)\s*\[\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\]\s*=\s*(?:React\.)?useState\b/;
+const NOT_CALLS = new Set(['if', 'for', 'while', 'switch', 'catch', 'function', 'return', 'typeof', 'await', 'super', 'constructor']);
+/** 看光标之后、之前这么多行里的调用 */
+const CALLS_AFTER = 12;
+const CALLS_BEFORE = 5;
+const MAX_DEFINITIONS = 2;
+const MAX_CALL_SITES = 1;
+const MAX_STATE_WRITES = 3;
+/** "名字 + 固定搭档"的用法示例最多这么多段 */
+const MAX_PATTERNS = 2;
+const MAX_DEFINITION_LINES = 16;
+const MAX_DEFINITION_CHARS = 600;
+const MAX_STATE_WRITE_LINES = 24;
+const MAX_STATE_WRITE_CHARS = 750;
+
+/** 光标紧跟在一个新函数的开头（上方 4 行内出现函数/方法声明行且缩进包住光标）时，返回该函数声明行号与名字 */
+function enclosingFunctionAt(source: TextSource, cursorLine: number): { line: number; name: string } | undefined {
+  const own = source.lineAt(cursorLine);
+  const cursorIndent = own.trim() === '' ? own.length : (/^[ \t]*/.exec(own) as RegExpExecArray)[0].length;
+  for (let l = cursorLine; l >= Math.max(0, cursorLine - 4); l--) {
+    const text = source.lineAt(l);
+    if (text.length > MAX_SCAN_LINE_CHARS) {
+      continue;
+    }
+    const name = (DEFINITION_RE.exec(text) ?? ARROW_DEFINITION_RE.exec(text))?.[1];
+    if (!name || NOT_CALLS.has(name)) {
+      continue;
+    }
+    const declIndent = (/^[ \t]*/.exec(text) as RegExpExecArray)[0].length;
+    if (l === cursorLine || cursorIndent > declIndent) {
+      return { line: l, name };
+    }
+  }
+  return undefined;
+}
+
 export function queryOf(source: TextSource, cursorLine: number, hint?: string): Query {
   const factors = new Map<string, number>();
   const n = Math.min(source.lineCount, MAX_SCAN_LINES);
-  const raise = (text: string, factor: number) => {
+  const raise = (text: string, factor: number, withSub = false) => {
     for (const token of tokensOf(text)) {
       factors.set(token, Math.max(factors.get(token) ?? 0, factor));
     }
+    if (withSub) {
+      for (const sub of subTokensOf(text)) {
+        factors.set(sub, Math.max(factors.get(sub) ?? 0, factor * 0.55));
+      }
+    }
   };
+  // 光标刚进入一个新函数开头时，不再越过函数声明行去抓上一个已闭合兄弟函数体内的局部变量，但保留声明上方的注释与顶级状态声明
+  const fnHead = enclosingFunctionAt(source, cursorLine);
   const from = Math.max(0, cursorLine - QUERY_BEFORE);
   const to = Math.min(n - 1, cursorLine + QUERY_AFTER);
-  for (let line = from; line <= to; line++) {
+  let blockedSiblingBody = false;
+  const fnIndent = fnHead ? (/^[ \t]*/.exec(source.lineAt(fnHead.line)) as RegExpExecArray)[0].length : -1;
+  for (let line = cursorLine; line >= from; line--) {
+    const text = source.lineAt(line);
+    if (fnHead && line < fnHead.line) {
+      const trimmed = text.trim();
+      if (trimmed === '' || COMMENT_LINE.test(text)) {
+        continue;
+      }
+      const ind = (/^[ \t]*/.exec(text) as RegExpExecArray)[0].length;
+      if (ind === fnIndent && /^\}/.test(trimmed)) {
+        blockedSiblingBody = true;
+        continue;
+      }
+      if (blockedSiblingBody) {
+        if (ind <= fnIndent && ((DEFINITION_RE.exec(text) ?? ARROW_DEFINITION_RE.exec(text)) !== null)) {
+          blockedSiblingBody = false;
+        }
+        continue;
+      }
+    }
     const distance = Math.abs(line - cursorLine);
-    raise(source.lineAt(line), distance <= 1 ? 2 : distance <= 2 ? 1 : 0.5);
+    raise(text, distance <= 1 ? 2 : distance <= 2 ? 1 : 0.5, distance <= 1 || line === fnHead?.line);
   }
-  // 意图注释：从光标所在行向上，跳过空行后连续的注释行
+  for (let line = cursorLine + 1; line <= to; line++) {
+    const distance = line - cursorLine;
+    raise(source.lineAt(line), distance <= 1 ? 2 : distance <= 2 ? 1 : 0.5, distance <= 1);
+  }
+  // 意图注释：优先从光标所在行向上跳过空行找紧邻注释；若光标行后方无注释但刚进入新函数声明，再看函数声明上方的注释
   let line = cursorLine;
   if (!COMMENT_LINE.test(source.lineAt(line))) {
     line--;
     while (line >= 0 && cursorLine - line <= 3 && source.lineAt(line).trim() === '') {
       line--;
     }
+    if ((line < 0 || !COMMENT_LINE.test(source.lineAt(line))) && fnHead && cursorLine - fnHead.line <= 2) {
+      line = fnHead.line - 1;
+      while (line >= 0 && fnHead.line - line <= 3 && source.lineAt(line).trim() === '') {
+        line--;
+      }
+    }
   }
   const phrases = new Set<string>();
   for (let count = 0; line >= 0 && count < 8 && COMMENT_LINE.test(source.lineAt(line)); line--, count++) {
-    raise(source.lineAt(line), 3);
+    raise(source.lineAt(line), 3, true);
     // 每个 4 字片段权重减半：连续 5 个字相同（两个片段）约等于一个少见的标识符，相同的字越多越靠前
     for (const phrase of phrasesOf(source.lineAt(line))) {
       phrases.add(phrase);
@@ -143,6 +262,9 @@ export function queryOf(source: TextSource, cursorLine: number, hint?: string): 
   const fromHint = new Set(tokensOf(hint ?? ''));
   for (const token of fromHint) {
     factors.set(token, Math.max(factors.get(token) ?? 0, 2));
+  }
+  for (const sub of subTokensOf(hint ?? '')) {
+    factors.set(sub, Math.max(factors.get(sub) ?? 0, 1.1));
   }
   return { factors, fromHint, phrases };
 }
@@ -156,19 +278,6 @@ export function tokenMatches(query: string, token: string, loose: boolean): bool
     (query.length >= 6 && token.startsWith(query)) ||
     (loose && token.length >= 8 && query.startsWith(token));
 }
-
-const CALL_RE = /([A-Za-z_$][\w$]*)\s*\(/g;
-const DEFINITION_RE = /^\s*(?:async\s+)?(?:function\s+)?([A-Za-z_$][\w$]*)\s*\([^()]*\)\s*\{\s*$/;
-const ARROW_DEFINITION_RE = /^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>/;
-const NOT_CALLS = new Set(['if', 'for', 'while', 'switch', 'catch', 'function', 'return', 'typeof', 'await', 'super', 'constructor']);
-/** 看光标之后、之前这么多行里的调用 */
-const CALLS_AFTER = 12;
-const CALLS_BEFORE = 5;
-const MAX_DEFINITIONS = 2;
-/** "名字 + 固定搭档"的用法示例最多这么多段 */
-const MAX_PATTERNS = 2;
-const MAX_DEFINITION_LINES = 16;
-const MAX_DEFINITION_CHARS = 600;
 
 /**
  * 光标附近调用的方法在本文件里的定义：先看光标之后（结果怎么被用），再看之前，由近到远。
@@ -244,6 +353,8 @@ export interface SnippetInput {
   excludeEnd: number;
   /** 模型草稿等额外线索，其中的标识符权重更高 */
   hint?: string;
+  /** 已预计算好的检索词，避免重复计算 */
+  query?: Query;
 }
 
 /** definition：被调用方法的定义；pattern：名字与固定搭档的用法；anchor：意图注释对上的注释及其下面的代码；scored：其余按得分选出的 */
@@ -261,14 +372,26 @@ export function relatedSnippets(input: SnippetInput): string[] {
 export function relatedSnippetItems(input: SnippetInput): SnippetItem[] {
   const { source } = input;
   const n = Math.min(source.lineCount, MAX_SCAN_LINES);
-  const { factors, fromHint, phrases } = queryOf(source, input.cursorLine, input.hint);
+  const baseQuery = input.query ?? queryOf(source, input.cursorLine, input.hint);
+  // expandQuery 会向 factors 写入搭档检索词，拷贝一份以免污染共享的 ctx.query
+  const factors = new Map(baseQuery.factors);
+  const { fromHint, phrases } = baseQuery;
   const index = new Map<string, number[]>();
   /** 行尾注释对上了意图注释的那些行，其代码部分的标识符：意图说的就是它们 */
   const named = new Set<string>();
+  const stateSetters = new Map<string, string>();
+  const stateDecls = new Map<string, { getter: string; setter: string }>();
   for (let line = 0; line < n; line++) {
     const text = source.lineAt(line);
     if (text.length > MAX_SCAN_LINE_CHARS) {
       continue;
+    }
+    const stateMatch = USE_STATE_RE.exec(text);
+    if (stateMatch) {
+      const getter = stateMatch[1] as string;
+      const setter = stateMatch[2] as string;
+      stateSetters.set(normalize(getter), setter);
+      stateDecls.set(normalize(getter), { getter, setter });
     }
     const tokens = tokensOf(text, phrases);
     for (const token of tokens) {
@@ -277,6 +400,16 @@ export function relatedSnippetItems(input: SnippetInput): SnippetItem[] {
         lines.push(line);
       } else {
         index.set(token, [line]);
+      }
+    }
+    for (const sub of subTokensOf(text)) {
+      if (!tokens.includes(sub)) {
+        const lines = index.get(sub);
+        if (lines) {
+          lines.push(line);
+        } else {
+          index.set(sub, [line]);
+        }
       }
     }
     if (phrases.size > 0 && !COMMENT_LINE.test(text) && !excluded(line) && tokens.some((token) => phrases.has(token))) {
@@ -342,6 +475,127 @@ export function relatedSnippetItems(input: SnippetInput): SnippetItem[] {
     used += text.length;
     for (let l = Math.max(0, range.start - RADIUS); l <= Math.min(n - 1, range.end + RADIUS); l++) {
       hits.delete(l);
+    }
+  }
+  // 反向结构召回 1：光标正在实现某个函数开头时，取出它在窗口外的调用点（说明外部对入参与返回值的期望）
+  const activeFn = enclosingFunctionAt(source, input.cursorLine);
+  const callSiteStateNorms = new Set<string>();
+  if (activeFn && activeFn.name.length >= 4) {
+    const callRe = new RegExp(`(?<![\\w$.])${activeFn.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\(`);
+    let callSites = 0;
+    for (let line = 0; line < n && callSites < MAX_CALL_SITES; line++) {
+      if (line === activeFn.line || excluded(line)) {
+        continue;
+      }
+      const raw = source.lineAt(line);
+      if (raw.length > MAX_SCAN_LINE_CHARS || COMMENT_LINE.test(raw) || !callRe.test(raw)) {
+        continue;
+      }
+      const range = frame(line, line, 3);
+      const text = render(range.start, range.end, MAX_DEFINITION_CHARS);
+      if (text !== undefined && used + text.length <= MAX_TOTAL_CHARS) {
+        snippets.push({ text, kind: 'definition' });
+        used += text.length;
+        callSites++;
+        // 调用点所在表达式紧邻的状态变量（如 `payValue === 4 ? '小金库' : getBankNumLast4()` 里的 `payValue`）正是当前函数要消费的状态，纳入下方 setter 召回
+        for (let cl = Math.max(range.start, line - 1); cl <= Math.min(range.end, line + 1); cl++) {
+          for (const tok of tokensOf(source.lineAt(cl))) {
+            if (stateSetters.has(tok)) {
+              callSiteStateNorms.add(tok);
+            }
+          }
+        }
+        for (let l = Math.max(0, range.start - RADIUS); l <= Math.min(n - 1, range.end + RADIUS); l++) {
+          hits.delete(l);
+        }
+      }
+    }
+  }
+  // 反向结构召回 2：检索词（或调用点条件）命中了同文件 React useState 状态时，取出对应的 setter(...) 数据构造与多分支赋值块
+  if (stateSetters.size > 0) {
+    const candidateWrites: Array<{ stateNorm: string; start: number; end: number; score: number }> = [];
+    for (const [stateNorm, setterName] of stateSetters) {
+      if ((factors.get(stateNorm) ?? 0) < 0.5 && !callSiteStateNorms.has(stateNorm)) {
+        continue;
+      }
+      // 容错：有些项目的 setter 命名为 setCardList（不以 cardlist 为前缀），按索引直接找 normalize(setterName) 即可
+      const setterRe = new RegExp(`(?<![\\w$.])${setterName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\(`);
+      for (const site of index.get(normalize(setterName)) ?? []) {
+        if (excluded(site)) {
+          continue;
+        }
+        const raw = source.lineAt(site);
+        if (COMMENT_LINE.test(raw) || USE_STATE_RE.test(raw) || !setterRe.test(raw)) {
+          continue;
+        }
+        const baseInd = indentOf(site);
+        let end = site;
+        // 过滤仅传入标量/简单变量（如 setVisible(false)、payValueSet(payValue)）的开关式调用，保留多行构造、三元条件分支或数组/对象写入
+        const trimmedRaw = raw.trim();
+        const isMultilineOpen = /[{([]\s*$/.test(trimmedRaw) || /=>\s*\{?\s*$/.test(trimmedRaw);
+        const isInlineDataWrite =
+          /\{.*:/.test(trimmedRaw) ||
+          /\?.*:/.test(trimmedRaw) ||
+          /\.(?:map|concat|filter|push|unshift)\s*\(/.test(trimmedRaw);
+        if (!isMultilineOpen && !isInlineDataWrite) {
+          continue;
+        }
+        if (isMultilineOpen) {
+          for (let l = site + 1; l < n && l - site < MAX_STATE_WRITE_LINES; l++) {
+            end = l;
+            const t = source.lineAt(l);
+            if (t.trim() !== '' && indentOf(l) <= baseInd) {
+              if (!/^\s*[)\]}]/.test(t)) {
+                end = l - 1;
+              }
+              break;
+            }
+          }
+        }
+        let start = site;
+        while (start > 0 && site - start < 2 && COMMENT_LINE.test(source.lineAt(start - 1))) {
+          start--;
+        }
+        let score = 0;
+        for (let l = Math.max(0, start - 2); l <= end; l++) {
+          for (const q of hits.get(l) ?? []) {
+            score += weights.get(q) ?? 0;
+          }
+        }
+        candidateWrites.push({ stateNorm, start, end, score });
+      }
+    }
+    candidateWrites.sort((a, b) => b.score - a.score);
+    // 先为每个相关状态各取最高分的 1 处写入块（避免某一个状态的 3 处写入把另一个相关状态挤掉），剩余名额再按总分补齐
+    const picked: Array<{ start: number; end: number }> = [];
+    const seenState = new Set<string>();
+    for (const item of candidateWrites) {
+      if (picked.length >= MAX_STATE_WRITES) {
+        break;
+      }
+      if (!seenState.has(item.stateNorm)) {
+        seenState.add(item.stateNorm);
+        picked.push(item);
+      }
+    }
+    for (const item of candidateWrites) {
+      if (picked.length >= MAX_STATE_WRITES) {
+        break;
+      }
+      if (!picked.includes(item)) {
+        picked.push(item);
+      }
+    }
+    for (const item of picked) {
+      const text = render(item.start, item.end, MAX_STATE_WRITE_CHARS);
+      if (text === undefined || used + text.length > MAX_TOTAL_CHARS) {
+        continue;
+      }
+      snippets.push({ text, kind: 'definition' });
+      used += text.length;
+      for (let l = Math.max(0, item.start - RADIUS); l <= Math.min(n - 1, item.end + RADIUS); l++) {
+        hits.delete(l);
+      }
     }
   }
   // 名字和它的固定搭档一起出现的位置，是"这个名字通常怎么用"最直接的例子：单独留名额，离光标近的优先。
@@ -654,6 +908,7 @@ export function createSnippetSource(enabled: () => boolean, near: () => boolean 
         excludeStart: ctx.windowStartLine,
         excludeEnd: ctx.windowStartLine + windowLines,
         ...(ctx.hint ? { hint: ctx.hint } : {}),
+        ...(ctx.query ? { query: ctx.query } : {}),
       });
       if (items.length === 0) {
         return undefined;

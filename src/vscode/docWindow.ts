@@ -3,6 +3,9 @@ import type { LiveDoc } from '../core/pipeline';
 import type { Position, TextSource } from '../core/types';
 
 export function vscodeSource(document: vscode.TextDocument): TextSource {
+  let cachedVersion = -1;
+  let cachedText = '';
+  let cachedLines: string[] | undefined;
   return {
     get lineCount() {
       return document.lineCount;
@@ -11,7 +14,34 @@ export function vscodeSource(document: vscode.TextDocument): TextSource {
       if (line < 0 || line >= document.lineCount) {
         return '';
       }
+      if (cachedLines && cachedVersion === document.version) {
+        return cachedLines[line] ?? '';
+      }
       return document.lineAt(line).text;
+    },
+    getText(maxChars?: number) {
+      if (typeof document.getText !== 'function') {
+        const parts: string[] = [];
+        let used = 0;
+        const limit = maxChars ?? Infinity;
+        for (let line = 0; line < document.lineCount && used < limit; line++) {
+          const text = document.lineAt(line).text;
+          parts.push(text);
+          used += text.length + 1;
+        }
+        return parts.join('\n');
+      }
+      if (cachedVersion !== document.version) {
+        const raw = document.getText();
+        cachedText = raw.includes('\r') ? raw.replace(/\r\n/g, '\n') : raw;
+        cachedLines = cachedText.split('\n');
+        cachedVersion = document.version;
+      }
+      if (maxChars !== undefined && cachedText.length > maxChars) {
+        const nl = cachedText.lastIndexOf('\n', maxChars);
+        return nl >= 0 ? cachedText.slice(0, nl) : cachedText.slice(0, maxChars);
+      }
+      return cachedText;
     },
   };
 }

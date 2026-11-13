@@ -16,6 +16,32 @@ function count(re: RegExp, text: string): number {
   return (text.match(re) ?? []).length;
 }
 
+/** 排除单双引号与反引号字符串字面量后，判断是否存在闭合标签（避免 `const s = '</script>'` 提前截断）。 */
+function hasOutsideString(lineText: string, re: RegExp): boolean {
+  let stripped = '';
+  let quote = '';
+  for (let i = 0; i < lineText.length; i++) {
+    const ch = lineText[i] as string;
+    if (quote) {
+      if (ch === '\\') {
+        i++;
+      } else if (ch === quote) {
+        quote = '';
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '/' && lineText[i + 1] === '/') {
+      break;
+    }
+    stripped += ch;
+  }
+  return re.test(stripped);
+}
+
 export function findSfcBlocks(source: TextSource): SfcBlock[] {
   const blocks: SfcBlock[] = [];
   const last = source.lineCount - 1;
@@ -53,7 +79,8 @@ export function findSfcBlocks(source: TextSource): SfcBlock[] {
         const t = source.lineAt(l);
         // 开始行本身可能就带结束标签：<script src="x"></script>
         const searchFrom = l === line ? t.indexOf('>') + 1 : 0;
-        if (closeRe.test(t.slice(Math.max(0, searchFrom)))) {
+        const slice = t.slice(Math.max(0, searchFrom));
+        if (tag === 'script' ? hasOutsideString(slice, closeRe) : closeRe.test(slice)) {
           end = l;
           break;
         }

@@ -4,6 +4,8 @@
 export interface TextSource {
   readonly lineCount: number;
   lineAt(line: number): string;
+  /** 可选：宿主可直接提供全文（如 VS Code document.getText()），避免逐行拼接。 */
+  getText?(maxChars?: number): string;
 }
 
 export interface Position {
@@ -75,6 +77,8 @@ export interface Config {
   model: string;
   triggerMode: 'auto' | 'manual';
   debounceMs: number;
+  /** 高确定性位置（注释/代码块回车、点号等）自动缩短防抖 */
+  adaptiveDebounce: boolean;
   minIntervalMs: number;
   /** 空行策略：smart 按位置限制范围；strict 仅在注释或代码块开头之后自动触发；always 不做限制。 */
   blankLine: 'smart' | 'strict' | 'always';
@@ -96,6 +100,8 @@ export interface Config {
   fileSnippets: boolean;
   /** 未提交改动：把与光标处相关的 git diff 改动块放进提示词 */
   gitDiff: boolean;
+  /** 已打开文档：把其他已打开同工作区文档里强相关的片段放进提示词 */
+  openTabs: boolean;
   /**
    * 连续几次请求沿用同一份头部（让服务端缓存命中）。
    * intent：只在同一段意图注释之下；block：另外在同一个代码块内（没有意图注释时以包着光标的块开头行为准）；off：不沿用。
@@ -127,6 +133,7 @@ export const DEFAULT_CONFIG: Config = {
   model: 'deepseek-flash',
   triggerMode: 'auto',
   debounceMs: 1000,
+  adaptiveDebounce: true,
   minIntervalMs: 3000,
   blankLine: 'smart',
   maxTokens: 96,
@@ -144,6 +151,7 @@ export const DEFAULT_CONFIG: Config = {
   fileUsage: true,
   fileSnippets: true,
   gitDiff: true,
+  openTabs: true,
   reuseHeader: 'block',
   nearCursorReference: false,
   verifyMembers: 'strict',

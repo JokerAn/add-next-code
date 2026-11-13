@@ -13,7 +13,7 @@ export class StatusController implements vscode.Disposable {
   private sub: vscode.Disposable | undefined;
 
   constructor(private readonly health: HealthState) {
-    this.item.command = 'addNextCode.showLog';
+    this.item.command = 'addNextCode.showMenu';
     this.sub = health.onChange((s) => {
       this.render();
       this.maybeNotify(s);
@@ -50,7 +50,7 @@ export class StatusController implements vscode.Disposable {
   render(): void {
     const h = this.health.snapshot;
     let text = 'FIM';
-    let tip = 'Add Next Code：就绪（点击打开日志）';
+    let tip = 'Add Next Code：就绪（点击打开快捷菜单）';
     if (!this.enabled) {
       text = 'FIM $(circle-slash)';
       tip = '已关闭。运行「Add Next Code: 开启/关闭补全」恢复。';

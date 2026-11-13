@@ -49,5 +49,5 @@ export function buildFimRequest(
 }
 
 export function modelKeyOf(cfg: Config): string {
-  return `${cfg.endpoint}|${cfg.model}|${cfg.temperature}|${cfg.maxTokens}`;
+  return `${cfg.endpoint}|${cfg.model}|${cfg.temperature}|${cfg.maxTokens}|${cfg.maxTokensManual}|${cfg.maxLines}`;
 }

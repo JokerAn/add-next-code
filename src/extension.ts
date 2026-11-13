@@ -1,4 +1,4 @@
-import * as fs from 'node:fs';
+import * as fs from 'node:fs/promises';
 import * as vscode from 'vscode';
 import { HealthState } from './core/backoff';
 import { BuildWatch } from './core/buildWatch';
@@ -12,6 +12,7 @@ import { createSnippetSource } from './core/snippets';
 import { createScopeSource, createUsageSource } from './core/usage';
 import { ConfigStore } from './vscode/config';
 import { GitDiffSource } from './vscode/gitDiff';
+import { OpenTabsSource } from './vscode/openTabs';
 import { ACCEPTED_COMMAND, FimInlineProvider } from './vscode/provider';
 import { KeyStore } from './vscode/secrets';
 import { StatusController } from './vscode/status';
@@ -37,25 +38,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const metrics = new Metrics();
   const cache = new CompletionCache();
   status.log(`[build] ${BUILD_ID}`);
-  // 安装同版本号的 VSIX 不会自动重载窗口：发现磁盘上的文件变了就提醒一次
+  // 安装同版本号的 VSIX 不会自动重载窗口：异步检查磁盘修改时间，发现变化提醒一次
   const entry = typeof __filename === 'string' ? __filename : undefined;
-  const buildWatch = new BuildWatch(() => {
+  const buildWatch = new BuildWatch(async () => {
     try {
-      return entry ? fs.statSync(entry).mtimeMs : undefined;
+      return entry ? (await fs.stat(entry)).mtimeMs : undefined;
     } catch {
       return undefined;
     }
   });
   const buildTimer = entry ? setInterval(() => {
-    if (buildWatch.shouldNotify()) {
-      status.log(`[build] ${STALE_NOTICE}`);
-      void vscode.window.showWarningMessage(`Add Next Code：${STALE_NOTICE}。`, '重载窗口').then((choice) => {
-        if (choice === '重载窗口') {
-          void vscode.commands.executeCommand('workbench.action.reloadWindow');
-        }
-      });
-    }
+    void buildWatch.refresh().then((notify) => {
+      if (notify) {
+        status.log(`[build] ${STALE_NOTICE}`);
+        void vscode.window.showWarningMessage(`Add Next Code：${STALE_NOTICE}。`, '重载窗口').then((choice) => {
+          if (choice === '重载窗口') {
+            void vscode.commands.executeCommand('workbench.action.reloadWindow');
+          }
+        });
+      }
+    });
   }, 5000) : undefined;
+  buildTimer?.unref?.();
   const gate = new PermissionGate(config.get());
   const project = new ProjectInfo();
   const symbols = new SymbolSource(() => config.get().useLanguageService);
@@ -92,17 +96,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     onAbortSettled: (ms) => metrics.abortSettleMs.push(ms),
   });
 
-  // 本次会话里编辑过的文档，用于给它们的未提交改动加权；只记 uri 与时间
+  // 本次会话里编辑过的文档，用于给它们的未提交改动和打开标签页加权；只记 uri 与时间
   const recentDocs = new Map<string, number>();
   const gitDiff = new GitDiffSource({
     enabled: () => config.get().gitDiff,
     gate,
     recentDocs: () => recentDocs.keys(),
   });
+  const openTabs = new OpenTabsSource({
+    enabled: () => config.get().openTabs,
+    gate,
+    recentDocs: () => recentDocs.keys(),
+  });
 
   const collector = createCollector({
     sources: [
-      symbols, skimmer, gitDiff,
+      symbols, skimmer, gitDiff, openTabs,
       createSnippetSource(() => config.get().fileSnippets, () => config.get().nearCursorReference),
       createScopeSource(() => config.get().fileUsage),
       createUsageSource(() => config.get().fileUsage),
@@ -143,13 +152,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     skimmer,
     vscode.languages.registerInlineCompletionItemProvider({ pattern: '**' }, provider),
 
-    // 输入事件只做缓存条目筛选，不读取任何文本
+    // 输入事件只做缓存条目筛选，不读取任何文本（同时传入改动起止行，覆盖大块粘贴/删除边界）
     vscode.workspace.onDidChangeTextDocument((e) => {
       if (e.contentChanges.length === 0) {
         return;
       }
       const key = e.document.uri.toString();
-      pipeline.onDocumentChanged(key, e.contentChanges.map((c) => c.range.start.line));
+      const lines: number[] = [];
+      for (const c of e.contentChanges) {
+        lines.push(c.range.start.line);
+        if (c.range.end.line !== c.range.start.line) {
+          lines.push(c.range.end.line);
+        }
+      }
+      pipeline.onDocumentChanged(key, lines);
       recentDocs.delete(key);
       recentDocs.set(key, Date.now());
       if (recentDocs.size > 50) {
@@ -168,12 +184,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         gate.prime(doc.uri);
       }
     }),
+    ...(typeof vscode.window.onDidChangeActiveTextEditor === 'function'
+      ? [vscode.window.onDidChangeActiveTextEditor((editor) => skimmer.scheduleWarmup(editor?.document))]
+      : []),
 
     config.onDidChange((event) => {
       pipeline.invalidate();
       gate.reconfigure(config.get());
       if (event.affectsConfiguration('addNextCode.skimmer')) {
-        void skimmer.restart();
+        void skimmer.restart().then(() => skimmer.scheduleWarmup(vscode.window.activeTextEditor?.document));
       }
       health.onConfigChanged();
       cache.clear();
@@ -226,7 +245,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       cache.clear();
       await skimmer.restart();
     }),
-    vscode.commands.registerCommand('addNextCode.showStats', () => {
+    vscode.commands.registerCommand('addNextCode.showStats', async () => {
+      await buildWatch.refresh();
       status.channel.appendLine(`─── 会话统计（构建 ${BUILD_ID}）───`);
       if (buildWatch.stale) {
         status.channel.appendLine(`⚠ ${STALE_NOTICE}`);
@@ -234,14 +254,73 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       status.channel.appendLine(metrics.summary());
       status.channel.show(true);
     }),
+    vscode.commands.registerCommand('addNextCode.showMenu', async () => {
+      if (typeof vscode.window.showQuickPick !== 'function') {
+        status.channel.show(true);
+        return;
+      }
+      const c = config.get();
+      const items: Array<vscode.QuickPickItem & { action: string }> = [
+        {
+          label: runtimeEnabled ? '$(circle-slash) 暂停补全' : '$(play) 开启补全',
+          description: runtimeEnabled ? '当前已开启' : '当前已关闭',
+          action: 'toggle',
+        },
+        {
+          label: '$(graph) 显示本次会话统计',
+          description: `请求 ${metrics.count} 次`,
+          action: 'stats',
+        },
+        {
+          label: '$(output) 打开日志通道',
+          action: 'log',
+        },
+        {
+          label: '$(key) 设置 API Key',
+          description: keys.hasKey ? '已设置' : '未设置',
+          action: 'key',
+        },
+        ...(c.skimmerEnabled
+          ? [{
+              label: '$(refresh) 重启 Skimmer 增强',
+              action: 'skimmer',
+            }]
+          : []),
+      ];
+      const picked = await vscode.window.showQuickPick(items, {
+        title: `Add Next Code（${c.model} · ${c.triggerMode === 'manual' ? '手动' : '自动'}）`,
+        placeHolder: '选择操作',
+      });
+      if (!picked) {
+        return;
+      }
+      switch (picked.action) {
+        case 'toggle':
+          await vscode.commands.executeCommand('addNextCode.toggle');
+          break;
+        case 'stats':
+          await vscode.commands.executeCommand('addNextCode.showStats');
+          break;
+        case 'log':
+          status.channel.show(true);
+          break;
+        case 'key':
+          await vscode.commands.executeCommand('addNextCode.setApiKey');
+          break;
+        case 'skimmer':
+          await vscode.commands.executeCommand('addNextCode.restartSkimmer');
+          break;
+      }
+    }),
   );
 
-  // 预热已打开文档的发送许可判定，避免第一次按键没有补全
+  // 预热已打开文档的发送许可判定，并在启用 Skimmer 时安排当前活动编辑器空闲预热
   for (const doc of vscode.workspace.textDocuments) {
     if (doc.uri.scheme === 'file' || doc.uri.scheme === 'untitled' || doc.uri.scheme === 'vscode-remote') {
       gate.prime(doc.uri);
     }
   }
+  skimmer.scheduleWarmup(vscode.window.activeTextEditor?.document);
 }
 
 export async function deactivate(): Promise<void> {
